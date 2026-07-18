@@ -238,6 +238,80 @@ async fn build_http_request(
     Ok(request)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BinaryExtractionStrategy {
+    TopLevelField(String),
+    NestedFieldPath(Vec<String>),
+    None,
+}
+
+impl BinaryExtractionStrategy {
+    fn derive(doc: &RestDescription, schema_name: &str) -> Self {
+        let schema = match doc.schemas.get(schema_name) {
+            Some(s) => s,
+            None => return Self::None,
+        };
+
+        for (prop_name, prop) in &schema.properties {
+            if prop.prop_type.as_deref() == Some("string") && prop.format.as_deref() == Some("byte") {
+                return Self::TopLevelField(prop_name.clone());
+            }
+        }
+
+        for (prop_name, prop) in &schema.properties {
+            if let Some(ref_name) = &prop.schema_ref {
+                match Self::derive(doc, ref_name) {
+                    Self::TopLevelField(sub_field) => {
+                        return Self::NestedFieldPath(vec![prop_name.clone(), sub_field]);
+                    }
+                    Self::NestedFieldPath(mut paths) => {
+                        paths.insert(0, prop_name.clone());
+                        return Self::NestedFieldPath(paths);
+                    }
+                    Self::None => {}
+                }
+            }
+        }
+
+        Self::None
+    }
+
+    fn extract(&self, val: &Value) -> Result<Vec<u8>, GwsError> {
+        match self {
+            Self::TopLevelField(field) => {
+                let s = val.get(field)
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| GwsError::Other(anyhow::anyhow!("Missing expected binary field '{field}'")))?;
+                decode_base64_or_url(s)
+            }
+            Self::NestedFieldPath(path) => {
+                let mut current = val;
+                for field in path {
+                    current = current.get(field)
+                        .ok_or_else(|| GwsError::Other(anyhow::anyhow!("Missing expected nested field '{field}'")))?;
+                }
+                let s = current.as_str()
+                    .ok_or_else(|| GwsError::Other(anyhow::anyhow!("Expected binary field is not a string")))?;
+                decode_base64_or_url(s)
+            }
+            Self::None => {
+                Err(GwsError::Other(anyhow::anyhow!("Response schema does not wrap binary data")))
+            }
+        }
+    }
+}
+
+fn decode_base64_or_url(s: &str) -> Result<Vec<u8>, GwsError> {
+    use base64::{engine::general_purpose::{STANDARD, URL_SAFE, STANDARD_NO_PAD, URL_SAFE_NO_PAD}, Engine as _};
+    let clean: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    
+    URL_SAFE.decode(&clean)
+        .or_else(|_| STANDARD.decode(&clean))
+        .or_else(|_| URL_SAFE_NO_PAD.decode(&clean))
+        .or_else(|_| STANDARD_NO_PAD.decode(&clean))
+        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to decode base64/base64url content: {e}")))
+}
+
 /// Handle a JSON response: parse, sanitize via Model Armor, output, and check pagination.
 /// Returns `Ok(true)` if the pagination loop should continue.
 #[allow(clippy::too_many_arguments)]
@@ -413,6 +487,11 @@ pub async fn execute_method(
 ) -> Result<Option<Value>, GwsError> {
     let input = parse_and_validate_inputs(doc, method, params_json, body_json, upload.is_some())?;
 
+    let response_schema_name = method.response.as_ref().and_then(|r| r.schema_ref.as_deref());
+    let strategy = response_schema_name
+        .map(|name| BinaryExtractionStrategy::derive(doc, name))
+        .unwrap_or(BinaryExtractionStrategy::None);
+
     if dry_run {
         let dry_run_info = json!({
             "dry_run": true,
@@ -494,6 +573,49 @@ pub async fn execute_method(
                 .text()
                 .await
                 .context("Failed to read response body")?;
+
+            if let Some(path) = output_path {
+                let json_val = serde_json::from_str::<Value>(&body_text)
+                    .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse response JSON: {e}")))?;
+
+                match strategy.extract(&json_val) {
+                    Ok(bytes) => {
+                        tokio::fs::write(path, &bytes)
+                            .await
+                            .context("Failed to write binary content to output file")?;
+
+                        let result = json!({
+                            "status": "success",
+                            "saved_file": path,
+                            "bytes": bytes.len(),
+                        });
+
+                        if capture_output {
+                            return Ok(Some(result));
+                        }
+                        println!("{}", crate::formatter::format_value(&result, output_format));
+                        return Ok(None);
+                    }
+                    Err(_) => {
+                        tokio::fs::write(path, body_text.as_bytes())
+                            .await
+                            .context("Failed to write JSON response to output file")?;
+
+                        let result = json!({
+                            "status": "success",
+                            "saved_file": path,
+                            "mimeType": "application/json",
+                            "bytes": body_text.len(),
+                        });
+
+                        if capture_output {
+                            return Ok(Some(result));
+                        }
+                        println!("{}", crate::formatter::format_value(&result, output_format));
+                        return Ok(None);
+                    }
+                }
+            }
 
             let should_continue = handle_json_response(
                 &body_text,
@@ -1193,6 +1315,90 @@ mod tests {
         JsonSchema, JsonSchemaProperty, MethodParameter, RestDescription, RestMethod,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_decode_base64_or_url() {
+        assert_eq!(decode_base64_or_url("SGVsbG8gV29ybGQ=").unwrap(), b"Hello World");
+        assert_eq!(decode_base64_or_url("SGVsbG8gV29ybGQ").unwrap(), b"Hello World");
+        assert_eq!(decode_base64_or_url("___-").unwrap(), b"\xff\xff\xfe");
+        assert_eq!(decode_base64_or_url("SGVsbG8g\n V29ybGQ=").unwrap(), b"Hello World");
+    }
+
+    #[test]
+    fn test_binary_extraction_strategy_derive() {
+        let mut schemas = std::collections::HashMap::new();
+
+        let mut properties = std::collections::HashMap::new();
+        properties.insert("data".to_string(), JsonSchemaProperty {
+            prop_type: Some("string".to_string()),
+            format: Some("byte".to_string()),
+            ..Default::default()
+        });
+        schemas.insert("MessagePartBody".to_string(), JsonSchema {
+            properties,
+            ..Default::default()
+        });
+
+        let mut properties_message = std::collections::HashMap::new();
+        properties_message.insert("raw".to_string(), JsonSchemaProperty {
+            prop_type: Some("string".to_string()),
+            format: Some("byte".to_string()),
+            ..Default::default()
+        });
+        schemas.insert("Message".to_string(), JsonSchema {
+            properties: properties_message,
+            ..Default::default()
+        });
+
+        let mut properties_draft = std::collections::HashMap::new();
+        properties_draft.insert("message".to_string(), JsonSchemaProperty {
+            schema_ref: Some("Message".to_string()),
+            ..Default::default()
+        });
+        schemas.insert("Draft".to_string(), JsonSchema {
+            properties: properties_draft,
+            ..Default::default()
+        });
+
+        let doc = RestDescription {
+            schemas,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            BinaryExtractionStrategy::derive(&doc, "MessagePartBody"),
+            BinaryExtractionStrategy::TopLevelField("data".to_string())
+        );
+        assert_eq!(
+            BinaryExtractionStrategy::derive(&doc, "Message"),
+            BinaryExtractionStrategy::TopLevelField("raw".to_string())
+        );
+        assert_eq!(
+            BinaryExtractionStrategy::derive(&doc, "Draft"),
+            BinaryExtractionStrategy::NestedFieldPath(vec!["message".to_string(), "raw".to_string()])
+        );
+        assert_eq!(
+            BinaryExtractionStrategy::derive(&doc, "Unknown"),
+            BinaryExtractionStrategy::None
+        );
+    }
+
+    #[test]
+    fn test_binary_extraction_strategy_extract() {
+        let strategy = BinaryExtractionStrategy::TopLevelField("data".to_string());
+        let val = json!({ "data": "SGVsbG8=" });
+        assert_eq!(strategy.extract(&val).unwrap(), b"Hello");
+
+        let strategy_nested = BinaryExtractionStrategy::NestedFieldPath(vec!["message".to_string(), "raw".to_string()]);
+        let val_nested = json!({
+            "message": {
+                "raw": "SGVsbG8="
+            }
+        });
+        assert_eq!(strategy_nested.extract(&val_nested).unwrap(), b"Hello");
+
+        assert!(strategy.extract(&json!({})).is_err());
+    }
 
     #[test]
     fn test_pagination_config_default() {

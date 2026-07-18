@@ -368,6 +368,191 @@ fn is_blocked_method(alias: &str, resource: &str, method: &str) -> bool {
         .any(|(s, r, m)| *s == alias && *r == resource && *m == method)
 }
 
+struct MethodInfo {
+    name: String,
+    about: String,
+    path_params: Vec<String>,
+    required_query_params: Vec<String>,
+    request_schema: Option<String>,
+    response_schema: Option<String>,
+}
+
+fn find_discovery_method<'a>(
+    doc: &'a crate::discovery::RestDescription,
+    resource_path: &[String],
+    method_name: &str,
+) -> Option<&'a crate::discovery::RestMethod> {
+    if resource_path.is_empty() {
+        return None;
+    }
+    let mut current_resource = doc.resources.get(&resource_path[0])?;
+    for sub_name in &resource_path[1..] {
+        current_resource = current_resource.resources.get(sub_name)?;
+    }
+    current_resource.methods.get(method_name)
+}
+
+fn walk_command_tree(
+    cmd: &Command,
+    current_path: &mut Vec<String>,
+    methods_by_path: &mut std::collections::BTreeMap<String, Vec<MethodInfo>>,
+    alias: &str,
+    doc: &crate::discovery::RestDescription,
+) {
+    let subcommands: Vec<_> = cmd.get_subcommands().collect();
+    if subcommands.is_empty() {
+        return;
+    }
+
+    let mut methods = Vec::new();
+    let mut sub_resources = Vec::new();
+
+    for sub in subcommands {
+        let name = sub.get_name();
+        if name.starts_with('+') || name == "help" {
+            continue;
+        }
+
+        if sub.get_subcommands().filter(|s| !s.get_name().starts_with('+') && s.get_name() != "help").next().is_some() {
+            sub_resources.push(sub);
+        } else {
+            methods.push(sub);
+        }
+    }
+
+    if !methods.is_empty() {
+        let path_key = current_path.join(".");
+        let mut method_infos = Vec::new();
+
+        for m in methods {
+            let mname = m.get_name();
+            if is_blocked_method(alias, &current_path.join("."), mname) {
+                continue;
+            }
+
+            let about_fallback = m.get_about().map(|s| s.to_string()).unwrap_or_default();
+            let mut info = MethodInfo {
+                name: mname.to_string(),
+                about: about_fallback.clone(),
+                path_params: Vec::new(),
+                required_query_params: Vec::new(),
+                request_schema: None,
+                response_schema: None,
+            };
+
+            if let Some(d_method) = find_discovery_method(doc, current_path, mname) {
+                if let Some(desc) = &d_method.description {
+                    info.about = crate::text::truncate_description(
+                        desc,
+                        crate::text::SKILL_BODY_DESCRIPTION_LIMIT,
+                        false,
+                    );
+                }
+                
+                let mut param_names: Vec<_> = d_method.parameters.keys().collect();
+                param_names.sort();
+                for name in param_names {
+                    let param = &d_method.parameters[name];
+                    if param.location.as_deref() == Some("path") {
+                        info.path_params.push(name.clone());
+                    } else if param.location.as_deref() == Some("query") && param.required {
+                        info.required_query_params.push(name.clone());
+                    }
+                }
+
+                info.request_schema = d_method.request.as_ref().and_then(|r| r.schema_ref.clone());
+                info.response_schema = d_method.response.as_ref().and_then(|r| r.schema_ref.clone());
+            }
+
+            method_infos.push(info);
+        }
+
+        if !method_infos.is_empty() {
+            method_infos.sort_by(|a, b| a.name.cmp(&b.name));
+            methods_by_path.insert(path_key, method_infos);
+        }
+    }
+
+    for sub in sub_resources {
+        let name = sub.get_name().to_string();
+        current_path.push(name);
+        walk_command_tree(sub, current_path, methods_by_path, alias, doc);
+        current_path.pop();
+    }
+}
+
+fn render_schema(
+    name: &str,
+    schema: &crate::discovery::JsonSchema,
+    _doc: &crate::discovery::RestDescription,
+    out: &mut String,
+) {
+    out.push_str(&format!("### {name}\n\n"));
+    if let Some(desc) = &schema.description {
+        let truncated = crate::text::truncate_description(desc, 300, false);
+        out.push_str(&format!("*Description: {truncated}*\n\n"));
+    }
+
+    if schema.properties.is_empty() {
+        out.push_str("*(No fields)*\n\n");
+        return;
+    }
+
+    out.push_str("| Field | Type | Description |\n");
+    out.push_str("|---|---|---|\n");
+
+    let mut prop_names: Vec<_> = schema.properties.keys().collect();
+    prop_names.sort();
+
+    for pname in prop_names {
+        let prop = &schema.properties[pname];
+        
+        let type_desc = match &prop.prop_type {
+            Some(t) => {
+                if t == "array" {
+                    if let Some(items) = &prop.items {
+                        if let Some(ref_name) = &items.schema_ref {
+                            format!("array of `{ref_name}`")
+                        } else if let Some(items_type) = &items.prop_type {
+                            format!("array of {items_type}")
+                        } else {
+                            "array".to_string()
+                        }
+                    } else {
+                        "array".to_string()
+                    }
+                } else if let Some(ref_name) = &prop.schema_ref {
+                    format!("`{ref_name}`")
+                } else {
+                    t.clone()
+                }
+            }
+            None => {
+                if let Some(ref_name) = &prop.schema_ref {
+                    format!("`{ref_name}`")
+                } else {
+                    "object".to_string()
+                }
+            }
+        };
+
+        let format_desc = if let Some(fmt) = &prop.format {
+            format!(" (format: {fmt})")
+        } else {
+            "".to_string()
+        };
+
+        let description = prop.description.as_deref().unwrap_or("—");
+        let truncated_desc = crate::text::truncate_description(description, 200, false)
+            .replace('|', "\\|");
+
+        out.push_str(&format!(
+            "| `{pname}` | {type_desc}{format_desc} | {truncated_desc} |\n"
+        ));
+    }
+    out.push_str("\n");
+}
+
 fn render_service_skill(
     alias: &str,
     entry: &services::ServiceEntry,
@@ -429,48 +614,58 @@ metadata:
         out.push('\n');
     }
 
-    // API resources
-    if !resources.is_empty() {
-        out.push_str("## API Resources\n\n");
-        for res in resources {
-            let res_name = res.get_name();
-            let methods: Vec<String> = res
-                .get_subcommands()
-                .filter(|m| !is_blocked_method(alias, res_name, m.get_name()))
-                .map(|m| {
-                    let mname = m.get_name().to_string();
-                    // Use full description from discovery doc (with higher limit)
-                    // instead of the CLI-truncated about text.
-                    let mabout =
-                        lookup_method_description(doc, res_name, &mname).unwrap_or_else(|| {
-                            m.get_about().map(|s| s.to_string()).unwrap_or_default()
-                        });
-                    format!("  - `{mname}` — {mabout}")
-                })
-                .collect();
+    // Walk resources and build methods map
+    let mut methods_by_path = std::collections::BTreeMap::new();
+    for res in resources {
+        let name = res.get_name().to_string();
+        let mut path = vec![name];
+        walk_command_tree(res, &mut path, &mut methods_by_path, alias, doc);
+    }
 
-            if methods.is_empty() {
-                // Might have sub-resources, list them
-                let subs: Vec<String> = res
-                    .get_subcommands()
-                    .filter(|s| s.get_subcommands().next().is_some())
-                    .map(|s| format!("  - `{}`", s.get_name()))
-                    .collect();
-                if !subs.is_empty() {
-                    out.push_str(&format!("### {res_name}\n\n"));
-                    for s in subs {
-                        out.push_str(&s);
-                        out.push('\n');
+    // API resources
+    let mut referenced_schemas = std::collections::BTreeSet::new();
+    if !methods_by_path.is_empty() {
+        out.push_str("## API Resources\n\n");
+        for (path, methods) in &methods_by_path {
+            out.push_str(&format!("### {path}\n\n"));
+            for m in methods {
+                out.push_str(&format!("  - `{}` — {}", m.name, m.about));
+                
+                let mut details = Vec::new();
+                if !m.path_params.is_empty() {
+                    details.push(format!("Required path params: {}", m.path_params.join(", ")));
+                }
+                if !m.required_query_params.is_empty() {
+                    details.push(format!("Required query params: {}", m.required_query_params.join(", ")));
+                }
+                if let Some(ref_name) = &m.request_schema {
+                    details.push(format!("Request body type: `{ref_name}`"));
+                    referenced_schemas.insert(ref_name.clone());
+                }
+                if let Some(ref_name) = &m.response_schema {
+                    details.push(format!("Response type: `{ref_name}`"));
+                    referenced_schemas.insert(ref_name.clone());
+                }
+
+                if !details.is_empty() {
+                    out.push_str("\n");
+                    for d in details {
+                        out.push_str(&format!("    - {}\n", d));
                     }
-                    out.push('\n');
+                } else {
+                    out.push_str("\n");
                 }
-            } else {
-                out.push_str(&format!("### {res_name}\n\n"));
-                for m in &methods {
-                    out.push_str(m);
-                    out.push('\n');
-                }
-                out.push('\n');
+            }
+            out.push_str("\n");
+        }
+    }
+
+    // Common Schemas section
+    if !referenced_schemas.is_empty() {
+        out.push_str("## Common Schemas\n\n");
+        for sname in referenced_schemas {
+            if let Some(schema) = doc.schemas.get(&sname) {
+                render_schema(&sname, schema, doc, &mut out);
             }
         }
     }
@@ -908,28 +1103,6 @@ fn truncate_desc(desc: &str) -> String {
     s
 }
 
-/// Looks up a method's full description from the Discovery Document and
-/// truncates it at the skill-body limit (longer than CLI help).
-fn lookup_method_description(
-    doc: &crate::discovery::RestDescription,
-    resource_name: &str,
-    method_name: &str,
-) -> Option<String> {
-    let resource = doc.resources.get(resource_name)?;
-    // Try direct method lookup first
-    if let Some(method) = resource.methods.get(method_name) {
-        if let Some(desc) = &method.description {
-            return Some(crate::text::truncate_description(
-                desc,
-                crate::text::SKILL_BODY_DESCRIPTION_LIMIT,
-                false,
-            ));
-        }
-    }
-    // For sub-resources listed as methods in the clap tree, return None
-    // (they show as "Operations on the 'X' resource" which is fine)
-    None
-}
 
 fn capitalize_first(s: &str) -> String {
     let mut chars = s.chars();
@@ -1088,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_method_description_found() {
+    fn test_find_discovery_method() {
         let mut methods = std::collections::HashMap::new();
         methods.insert(
             "list".to_string(),
@@ -1114,22 +1287,22 @@ mod tests {
             resources,
             ..Default::default()
         };
-        let result = lookup_method_description(&doc, "files", "list");
+        let result = find_discovery_method(&doc, &["files".to_string()], "list");
         assert!(result.is_some());
-        assert!(result.unwrap().contains("Lists all the files"));
+        assert_eq!(result.unwrap().description.as_deref(), Some("Lists all the files. For more details see the docs."));
     }
 
     #[test]
-    fn test_lookup_method_description_missing_resource() {
+    fn test_find_discovery_method_missing_resource() {
         let doc = crate::discovery::RestDescription {
             name: "drive".to_string(),
             ..Default::default()
         };
-        assert!(lookup_method_description(&doc, "missing", "list").is_none());
+        assert!(find_discovery_method(&doc, &["missing".to_string()], "list").is_none());
     }
 
     #[test]
-    fn test_lookup_method_description_missing_method() {
+    fn test_find_discovery_method_missing_method() {
         let mut resources = std::collections::HashMap::new();
         resources.insert(
             "files".to_string(),
@@ -1140,35 +1313,7 @@ mod tests {
             resources,
             ..Default::default()
         };
-        assert!(lookup_method_description(&doc, "files", "missing").is_none());
-    }
-
-    #[test]
-    fn test_lookup_method_description_no_description() {
-        let mut methods = std::collections::HashMap::new();
-        methods.insert(
-            "list".to_string(),
-            crate::discovery::RestMethod {
-                description: None,
-                http_method: "GET".to_string(),
-                path: "files".to_string(),
-                ..Default::default()
-            },
-        );
-        let mut resources = std::collections::HashMap::new();
-        resources.insert(
-            "files".to_string(),
-            crate::discovery::RestResource {
-                methods,
-                ..Default::default()
-            },
-        );
-        let doc = crate::discovery::RestDescription {
-            name: "drive".to_string(),
-            resources,
-            ..Default::default()
-        };
-        assert!(lookup_method_description(&doc, "files", "list").is_none());
+        assert!(find_discovery_method(&doc, &["files".to_string()], "missing").is_none());
     }
 
     #[test]

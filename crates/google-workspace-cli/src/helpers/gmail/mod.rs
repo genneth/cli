@@ -17,9 +17,11 @@ pub mod forward;
 pub mod read;
 pub mod reply;
 pub mod send;
+pub mod attachment;
 pub mod triage;
 pub mod watch;
 
+use attachment::handle_attachment;
 use forward::handle_forward;
 use read::handle_read;
 use reply::handle_reply;
@@ -685,7 +687,7 @@ fn parse_profile_display_name(body: &Value) -> Option<String> {
 ///
 /// Calls `GET /users/me/messages/{messageId}/attachments/{attachmentId}`,
 /// decodes the base64url `data` field, and returns raw bytes.
-async fn fetch_attachment_data(
+pub(super) async fn fetch_attachment_data(
     client: &reqwest::Client,
     token: &str,
     message_id: &str,
@@ -1840,6 +1842,62 @@ TIPS:
         );
 
         cmd = cmd.subcommand(
+            Command::new("+attachment")
+                .about("[Helper] Download email attachments by name or download all attachments")
+                .arg(
+                    Arg::new("message-id")
+                        .long("message-id")
+                        .short('m')
+                        .help("Gmail message ID")
+                        .required(true)
+                        .value_name("MSG_ID"),
+                )
+                .arg(
+                    Arg::new("name")
+                        .long("name")
+                        .short('n')
+                        .help("Name of the attachment to download")
+                        .value_name("FILENAME")
+                        .conflicts_with("all"),
+                )
+                .arg(
+                    Arg::new("all")
+                        .long("all")
+                        .short('a')
+                        .help("Download all attachments")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .short('o')
+                        .help("Output file path (only valid with --name)")
+                        .value_name("PATH")
+                        .conflicts_with("all"),
+                )
+                .arg(
+                    Arg::new("output-dir")
+                        .long("output-dir")
+                        .short('d')
+                        .help("Output directory for downloaded files")
+                        .value_name("DIR"),
+                )
+                .arg(
+                    Arg::new("dry-run")
+                        .long("dry-run")
+                        .help("Show the operations that would be executed without running them")
+                        .action(ArgAction::SetTrue),
+                )
+                .after_help(
+                    "\
+EXAMPLES:
+  gws gmail +attachment --message-id MSG_ID --name invoice.pdf --output ./invoice.pdf
+  gws gmail +attachment --message-id MSG_ID --all --output-dir ./downloads/
+",
+                )
+        );
+
+        cmd = cmd.subcommand(
             Command::new("+watch")
                 .about("[Helper] Watch for new emails and stream them as NDJSON")
                 .arg(
@@ -1958,6 +2016,11 @@ TIPS:
 
             if let Some(matches) = matches.subcommand_matches("+read") {
                 handle_read(doc, matches).await?;
+                return Ok(true);
+            }
+
+            if let Some(matches) = matches.subcommand_matches("+attachment") {
+                handle_attachment(doc, matches).await?;
                 return Ok(true);
             }
 
@@ -2331,6 +2394,7 @@ mod tests {
         assert!(subcommands.contains(&"+reply-all"));
         assert!(subcommands.contains(&"+forward"));
         assert!(subcommands.contains(&"+read"));
+        assert!(subcommands.contains(&"+attachment"));
     }
 
     #[test]

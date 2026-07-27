@@ -413,7 +413,7 @@ fn walk_command_tree(
             continue;
         }
 
-        if sub.get_subcommands().filter(|s| !s.get_name().starts_with('+') && s.get_name() != "help").next().is_some() {
+        if sub.get_subcommands().find(|s| !s.get_name().starts_with('+') && s.get_name() != "help").is_some() {
             sub_resources.push(sub);
         } else {
             methods.push(sub);
@@ -550,7 +550,7 @@ fn render_schema(
             "| `{pname}` | {type_desc}{format_desc} | {truncated_desc} |\n"
         ));
     }
-    out.push_str("\n");
+    out.push('\n');
 }
 
 fn render_service_skill(
@@ -648,15 +648,15 @@ metadata:
                 }
 
                 if !details.is_empty() {
-                    out.push_str("\n");
+                    out.push('\n');
                     for d in details {
                         out.push_str(&format!("    - {}\n", d));
                     }
                 } else {
-                    out.push_str("\n");
+                    out.push('\n');
                 }
             }
-            out.push_str("\n");
+            out.push('\n');
         }
     }
 

@@ -77,6 +77,15 @@ pub(super) async fn handle_read(
         writeln!(stdout, "---").context("Failed to write header separator")?;
     }
 
+    if !original.parts.is_empty() {
+        writeln!(stdout, "Attachments:").context("Failed to write attachments header")?;
+        for part in &original.parts {
+            writeln!(stdout, "  - {} ({} bytes, ID: {})", part.filename, part.size, part.attachment_id)
+                .context("Failed to write attachment details")?;
+        }
+        writeln!(stdout, "---").context("Failed to write attachments separator")?;
+    }
+
     let body = if use_html {
         original
             .body_html

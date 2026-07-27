@@ -217,7 +217,7 @@ Environment variables can also live in a `.env` file.
 
 ## AI Agent Skills
 
-The repo ships 100+ Agent Skills (`SKILL.md` files) — one for every supported API, plus higher-level helpers for common workflows and 50 curated recipes for Gmail, Drive, Docs, Calendar, and Sheets. See the full [Skills Index](docs/skills.md) for the complete list.
+The repo ships Agent Skills (`SKILL.md` files) for every supported API and higher-level helpers for common workflows. See the full [Skills Index](docs/skills.md) for the complete list. Personas and recipes are optional registry content; generate them with `gws generate-skills --really-all`.
 
 ```bash
 # Install all skills at once

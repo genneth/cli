@@ -14,7 +14,7 @@
 
 //! Generates SKILL.md files from the CLI's own clap metadata.
 //!
-//! Usage: `gws generate-skills [--output-dir skills/]`
+//! Usage: `gws generate-skills [--output-dir skills/] [--really-all]`
 
 use crate::commands;
 use crate::discovery;
@@ -26,6 +26,7 @@ use std::path::Path;
 
 const PERSONAS_TOML: &str = include_str!("../registry/personas.toml");
 const RECIPES_TOML: &str = include_str!("../registry/recipes.toml");
+const REALLY_ALL_FLAG: &str = "--really-all";
 
 /// Methods blocked from skill generation.
 /// Format: (service_alias, resource, method).
@@ -84,6 +85,10 @@ pub async fn handle_generate_skills(args: &[String]) -> Result<(), GwsError> {
     let output_path_buf = crate::validate::validate_safe_output_dir(&output_dir)?;
     let output_path = output_path_buf.as_path();
     let filter = parse_filter(args);
+    let include_registry_skills = parse_really_all(args);
+    if should_clean_registry_skills(&filter, include_registry_skills) {
+        clean_registry_skill_outputs(output_path)?;
+    }
     let mut index: Vec<SkillIndexEntry> = Vec::new();
 
     // Generate gws-shared skill if no filter or "shared" is in the filter
@@ -202,9 +207,10 @@ pub async fn handle_generate_skills(args: &[String]) -> Result<(), GwsError> {
         }
     }
 
-    if filter
-        .as_ref()
-        .is_none_or(|f| "persona".contains(f.as_str()) || "personas".contains(f.as_str()))
+    if include_registry_skills
+        || filter
+            .as_ref()
+            .is_some_and(|f| "persona".contains(f.as_str()) || "personas".contains(f.as_str()))
     {
         if let Ok(registry) = toml::from_str::<PersonaRegistry>(PERSONAS_TOML) {
             eprintln!(
@@ -233,9 +239,10 @@ pub async fn handle_generate_skills(args: &[String]) -> Result<(), GwsError> {
     }
 
     // Generate Recipes
-    if filter
-        .as_ref()
-        .is_none_or(|f| "recipe".contains(f.as_str()) || "recipes".contains(f.as_str()))
+    if include_registry_skills
+        || filter
+            .as_ref()
+            .is_some_and(|f| "recipe".contains(f.as_str()) || "recipes".contains(f.as_str()))
     {
         if let Ok(registry) = toml::from_str::<RecipeRegistry>(RECIPES_TOML) {
             eprintln!(
@@ -281,6 +288,51 @@ fn parse_output_dir(args: &[String]) -> String {
         }
     }
     "skills".to_string()
+}
+
+fn parse_really_all(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == REALLY_ALL_FLAG)
+}
+
+fn should_clean_registry_skills(filter: &Option<String>, include_registry_skills: bool) -> bool {
+    filter.is_none() && !include_registry_skills
+}
+
+fn clean_registry_skill_outputs(output_path: &Path) -> Result<(), GwsError> {
+    let personas: PersonaRegistry = toml::from_str(PERSONAS_TOML)
+        .map_err(|e| GwsError::Validation(format!("Failed to parse personas.toml: {e}")))?;
+    let recipes: RecipeRegistry = toml::from_str(RECIPES_TOML)
+        .map_err(|e| GwsError::Validation(format!("Failed to parse recipes.toml: {e}")))?;
+
+    for name in personas
+        .personas
+        .into_iter()
+        .map(|persona| format!("persona-{}", persona.name))
+        .chain(
+            recipes
+                .recipes
+                .into_iter()
+                .map(|recipe| format!("recipe-{}", recipe.name)),
+        )
+    {
+        let path = output_path.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                std::fs::remove_dir_all(&path).map_err(|e| {
+                    GwsError::Validation(format!("Failed to remove {}: {e}", path.display()))
+                })?;
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(GwsError::Validation(format!(
+                    "Failed to inspect {}: {e}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse `--filter <match>` into a substring filter.
@@ -1152,6 +1204,41 @@ mod tests {
     use crate::services;
     use clap::Command;
     use std::collections::HashSet;
+
+    #[test]
+    fn test_parse_really_all() {
+        assert!(!parse_really_all(&[]));
+        assert!(parse_really_all(&[REALLY_ALL_FLAG.to_string()]));
+        assert!(parse_really_all(&[
+            "--output-dir".to_string(),
+            "skills".to_string(),
+            REALLY_ALL_FLAG.to_string(),
+        ]));
+    }
+
+    #[test]
+    fn test_registry_cleanup_only_for_default_generation() {
+        assert!(should_clean_registry_skills(&None, false));
+        assert!(!should_clean_registry_skills(&None, true));
+        assert!(!should_clean_registry_skills(&Some("recipe".to_string()), false));
+    }
+
+    #[test]
+    fn test_clean_registry_skill_outputs_removes_only_registry_directories() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let persona = output_dir.path().join("persona-exec-assistant");
+        let recipe = output_dir.path().join("recipe-send-team-announcement");
+        let service = output_dir.path().join("gws-gmail");
+        std::fs::create_dir_all(&persona).unwrap();
+        std::fs::create_dir_all(&recipe).unwrap();
+        std::fs::create_dir_all(&service).unwrap();
+
+        clean_registry_skill_outputs(output_dir.path()).unwrap();
+
+        assert!(!persona.exists());
+        assert!(!recipe.exists());
+        assert!(service.exists());
+    }
 
     #[test]
     fn test_registry_references() {

@@ -25,6 +25,7 @@ Drive, Gmail, Calendar, and every Workspace API. Zero boilerplate. Structured JS
 
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
+- [Shell Completion](#shell-completion)
 - [Quick Start](#quick-start)
 - [Why gws?](#why-gws)
 - [Authentication](#authentication)
@@ -69,6 +70,37 @@ On macOS and Linux, you can also install via [Homebrew](https://brew.sh/):
 ```bash
 brew install googleworkspace-cli
 ```
+
+## Shell Completion
+
+Generate a completion script for Bash, Zsh, Fish, PowerShell, or Elvish:
+
+```bash
+# Bash (current session)
+source <(gws completion bash)
+
+# Zsh (current session)
+source <(gws completion zsh)
+
+# Fish (current session)
+gws completion fish | source
+```
+
+```powershell
+# PowerShell
+gws completion powershell | Out-String | Invoke-Expression
+```
+
+```elvish
+# Elvish
+eval (gws completion elvish | slurp)
+```
+
+For faster shell startup, generate the script once into your shell's completion directory instead
+of adding the generation command to your startup file. For example, Fish loads
+`~/.config/fish/completions/gws.fish`, while Bash and Zsh completion directories vary by
+installation. The generated script is a snapshot of the current Google API Discovery documents;
+regenerate it after upgrading `gws` to pick up newly added services and methods.
 
 ## Quick Start
 

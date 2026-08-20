@@ -395,7 +395,7 @@ fn build_login_subcommand() -> clap::Command {
 }
 
 /// Build the clap Command for `gws auth`.
-fn auth_command() -> clap::Command {
+pub(crate) fn auth_command() -> clap::Command {
     clap::Command::new("auth")
         .about("Manage authentication for Google Workspace APIs")
         .subcommand_required(false)

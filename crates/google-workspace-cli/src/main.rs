@@ -23,6 +23,7 @@ mod auth;
 pub(crate) mod auth_commands;
 mod client;
 mod commands;
+mod completion;
 pub(crate) mod credential_store;
 mod discovery;
 mod error;
@@ -109,6 +110,12 @@ async fn run() -> Result<(), GwsError> {
         println!("gws {}", env!("CARGO_PKG_VERSION"));
         println!("This is not an officially supported Google product.");
         return Ok(());
+    }
+
+    // Handle the `completion` command
+    if first_arg == "completion" {
+        let completion_args: Vec<String> = args.iter().skip(2).cloned().collect();
+        return completion::handle_completion_command(&completion_args).await;
     }
 
     // Handle the `schema` command
@@ -442,6 +449,7 @@ fn print_usage() {
     println!();
     println!("USAGE:");
     println!("    gws <service> <resource> [sub-resource] <method> [flags]");
+    println!("    gws completion <shell>");
     println!("    gws schema <service.resource.method> [--resolve-refs]");
     println!();
     println!("EXAMPLES:");

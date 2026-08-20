@@ -18,35 +18,19 @@ use crate::discovery::{RestDescription, RestResource};
 
 /// Builds the full CLI command tree from a Discovery Document.
 pub fn build_cli(doc: &RestDescription) -> Command {
+    add_global_args(build_service_cli("gws", doc))
+}
+
+/// Builds the command tree for one service under an aggregate root command.
+pub(crate) fn build_service_cli(name: &'static str, doc: &RestDescription) -> Command {
     let about_text = doc
         .description
         .clone()
         .unwrap_or_else(|| "Google Workspace CLI".to_string());
-    let mut root = Command::new("gws")
+    let mut root = Command::new(name)
         .about(about_text)
         .subcommand_required(true)
-        .arg_required_else_help(true)
-        .arg(
-            clap::Arg::new("sanitize")
-                .long("sanitize")
-                .help("Sanitize API responses through a Model Armor template. Requires cloud-platform scope. Format: projects/PROJECT/locations/LOCATION/templates/TEMPLATE. Also reads GWS_SANITIZE_TEMPLATE env var.")
-                .value_name("TEMPLATE")
-                .global(true),
-        )
-        .arg(
-            clap::Arg::new("dry-run")
-                .long("dry-run")
-                .help("Validate the request locally without sending it to the API")
-                .action(clap::ArgAction::SetTrue)
-                .global(true),
-        )
-        .arg(
-            clap::Arg::new("format")
-                .long("format")
-                .help("Output format: json (default), table, yaml, csv")
-                .value_name("FORMAT")
-                .global(true),
-        );
+        .arg_required_else_help(true);
 
     // Inject helper commands
     let helper = crate::helpers::get_helper(&doc.name);
@@ -68,6 +52,45 @@ pub fn build_cli(doc: &RestDescription) -> Command {
     }
 
     root
+}
+
+/// Adds flags shared throughout a service command tree.
+pub(crate) fn add_global_args(command: Command) -> Command {
+    command
+        .arg(
+            clap::Arg::new("sanitize")
+                .long("sanitize")
+                .help("Sanitize API responses through a Model Armor template. Requires cloud-platform scope. Format: projects/PROJECT/locations/LOCATION/templates/TEMPLATE. Also reads GWS_SANITIZE_TEMPLATE env var.")
+                .value_name("TEMPLATE")
+                .global(true),
+        )
+        .arg(
+            clap::Arg::new("dry-run")
+                .long("dry-run")
+                .help("Validate the request locally without sending it to the API")
+                .action(clap::ArgAction::SetTrue)
+                .global(true),
+        )
+        .arg(
+            clap::Arg::new("format")
+                .long("format")
+                .help("Output format: json (default), table, yaml, csv")
+                .value_name("FORMAT")
+                .global(true),
+        )
+        .arg(api_version_arg().global(true))
+}
+
+/// Adds the version override accepted before a service name.
+pub(crate) fn add_api_version_arg(command: Command) -> Command {
+    command.arg(api_version_arg())
+}
+
+fn api_version_arg() -> Arg {
+    Arg::new("api-version")
+        .long("api-version")
+        .help("Override the API version (e.g., v2, v3)")
+        .value_name("VERSION")
 }
 
 /// Recursively builds a Command for a resource.
@@ -267,16 +290,16 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_arg_present() {
+    fn test_global_args_present() {
         let doc = make_doc();
         let cmd = build_cli(&doc);
 
-        // The --sanitize global arg should be available
-        let args: Vec<_> = cmd.get_arguments().collect();
-        let sanitize_arg = args.iter().find(|a| a.get_id() == "sanitize");
-        assert!(
-            sanitize_arg.is_some(),
-            "--sanitize arg should be present on root command"
-        );
+        let ids: Vec<_> = cmd
+            .get_arguments()
+            .map(|arg| arg.get_id().as_str())
+            .collect();
+        for expected in ["sanitize", "dry-run", "format", "api-version"] {
+            assert!(ids.contains(&expected), "--{expected} should be global");
+        }
     }
 }

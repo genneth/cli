@@ -1204,22 +1204,65 @@ async fn handle_status() -> Result<(), GwsError> {
     let enc_path = credential_store::encrypted_credentials_path();
     let token_cache = token_cache_path();
 
+    let credentials_file_env = std::env::var("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE").ok();
+    let adc_env_path = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+        .ok()
+        .map(PathBuf::from);
+    let adc_well_known = crate::auth::adc_well_known_path();
+    let has_token_env = std::env::var("GOOGLE_WORKSPACE_CLI_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .is_some();
+
     let has_encrypted = enc_path.exists();
     let has_plain = plain_path.exists();
     let has_token_cache = token_cache.exists();
 
-    let auth_method = if has_encrypted || has_plain {
+    // Keep this order in sync with auth::load_credentials_inner(). The old
+    // status code inspected only client_secret.json, which could report a
+    // configured OAuth client even when gws was actually using ADC (or an
+    // environment-provided credentials file).
+    let credential_source = if has_token_env {
+        "token_env_var"
+    } else if credentials_file_env.is_some() {
+        "credentials_file_env"
+    } else if has_encrypted {
+        "encrypted_credentials"
+    } else if has_plain {
+        "plaintext_credentials"
+    } else if adc_env_path.is_some() {
+        "google_application_credentials"
+    } else if adc_well_known.as_ref().is_some_and(|path| path.exists()) {
+        "adc_well_known_file"
+    } else {
+        "none"
+    };
+
+    let credential_source_exists = match credential_source {
+        "token_env_var" => true,
+        "credentials_file_env" => credentials_file_env
+            .as_deref()
+            .is_some_and(|path| Path::new(path).exists()),
+        "encrypted_credentials" => has_encrypted,
+        "plaintext_credentials" => has_plain,
+        "google_application_credentials" => adc_env_path.as_deref().is_some_and(Path::exists),
+        "adc_well_known_file" => adc_well_known.as_ref().is_some_and(|path| path.exists()),
+        _ => false,
+    };
+
+    let has_any_credentials = credential_source != "none";
+
+    let auth_method = if has_any_credentials {
         "oauth2"
     } else {
         "none"
     };
 
-    let storage = if has_encrypted {
-        "encrypted"
-    } else if has_plain {
-        "plaintext"
-    } else {
-        "none"
+    let storage = match credential_source {
+        "encrypted_credentials" => "encrypted",
+        "plaintext_credentials" => "plaintext",
+        "none" => "none",
+        _ => "environment",
     };
 
     let mut output = json!({
@@ -1231,6 +1274,13 @@ async fn handle_status() -> Result<(), GwsError> {
         "plain_credentials": plain_path.display().to_string(),
         "plain_credentials_exists": has_plain,
         "token_cache_exists": has_token_cache,
+        "credentials_file_env": credentials_file_env,
+        "adc_env_path": adc_env_path.as_ref().map(|p| p.display().to_string()),
+        "adc_env_exists": adc_env_path.as_deref().is_some_and(Path::exists),
+        "adc_well_known_path": adc_well_known.as_ref().map(|p| p.display().to_string()),
+        "adc_well_known_exists": adc_well_known.as_ref().is_some_and(|p| p.exists()),
+        "credential_source": credential_source,
+        "credential_source_exists": credential_source_exists,
     });
 
     // Show client config (client_secret.json) status
@@ -1260,35 +1310,14 @@ async fn handle_status() -> Result<(), GwsError> {
         }
     }
 
-    // Show credential source by attempting actual resolution
-    let has_token_env = std::env::var("GOOGLE_WORKSPACE_CLI_TOKEN")
-        .ok()
-        .filter(|t| !t.is_empty())
-        .is_some();
-
-    let credential_source = if has_token_env {
+    if has_token_env {
         output["token_env_var"] = json!(true);
-        "token_env_var"
-    } else {
-        match resolve_client_credentials() {
-            Ok((_, _, _)) => {
-                let has_env_id = std::env::var("GOOGLE_WORKSPACE_CLI_CLIENT_ID").is_ok();
-                let has_env_secret = std::env::var("GOOGLE_WORKSPACE_CLI_CLIENT_SECRET").is_ok();
-                if has_env_id && has_env_secret {
-                    "environment_variables"
-                } else {
-                    "client_secret.json"
-                }
-            }
-            Err(_) => "none",
-        }
-    };
-    output["credential_source"] = json!(credential_source);
+    }
 
     // Try to read and show masked info from encrypted credentials
     // Skip real credential/network access in test builds
     if !cfg!(test) {
-        if has_encrypted {
+        if credential_source == "encrypted_credentials" && has_encrypted {
             match credential_store::load_encrypted() {
                 Ok(contents) => {
                     if let Ok(creds) = serde_json::from_str::<serde_json::Value>(&contents) {
@@ -1317,7 +1346,7 @@ async fn handle_status() -> Result<(), GwsError> {
                         json!("Could not decrypt. May have been created on a different machine.");
                 }
             }
-        } else if has_plain {
+        } else if credential_source == "plaintext_credentials" && has_plain {
             match tokio::fs::read_to_string(&plain_path).await {
                 Ok(contents) => {
                     if let Ok(creds) = serde_json::from_str::<serde_json::Value>(&contents) {
@@ -1346,12 +1375,12 @@ async fn handle_status() -> Result<(), GwsError> {
     // If we have credentials, try to get live info (user, scopes, APIs)
     // Skip all network calls and subprocess spawning in test builds
     if !cfg!(test) {
-        let creds_json_str = if has_encrypted {
-            credential_store::load_encrypted().ok()
-        } else if has_plain {
-            tokio::fs::read_to_string(&plain_path).await.ok()
-        } else {
-            None
+        let creds_json_str = match credential_source {
+            "encrypted_credentials" => credential_store::load_encrypted().ok(),
+            "plaintext_credentials" if has_plain => {
+                tokio::fs::read_to_string(&plain_path).await.ok()
+            }
+            _ => None,
         };
 
         if let Some(creds_str) = creds_json_str {
@@ -1425,6 +1454,15 @@ async fn handle_status() -> Result<(), GwsError> {
                                     output["token_valid"] = json!(false);
                                     if let Some(err) =
                                         token_json.get("error_description").and_then(|v| v.as_str())
+                                    {
+                                        output["token_error"] = json!(err);
+                                        if crate::auth::is_refresh_token_error(err) {
+                                            output["token_action"] = json!(
+                                                "Run `gws auth login`. If this recurs after about seven days, move the OAuth app from Testing to In production (or use Internal for a Workspace organization)."
+                                            );
+                                        }
+                                    } else if let Some(err) =
+                                        token_json.get("error").and_then(|v| v.as_str())
                                     {
                                         output["token_error"] = json!(err);
                                     }

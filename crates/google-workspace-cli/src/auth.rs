@@ -22,6 +22,8 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use serde::Deserialize;
+use time::{Duration, OffsetDateTime};
+use yup_oauth2::storage::{TokenInfo, TokenStorage};
 
 use crate::credential_store;
 
@@ -38,10 +40,43 @@ const PROXY_ENV_VARS: &[&str] = &[
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    #[allow(dead_code)]
+    refresh_token: Option<String>,
     expires_in: u64,
-    #[allow(dead_code)]
     token_type: String,
+}
+
+/// Convert a token endpoint response into the representation used by the
+/// encrypted yup-oauth2 cache.
+fn token_info_from_response(
+    response: TokenResponse,
+    previous_refresh_token: &str,
+) -> anyhow::Result<TokenInfo> {
+    if !response.token_type.eq_ignore_ascii_case("bearer") {
+        anyhow::bail!(
+            "Token refresh returned unsupported token type '{}'; expected Bearer",
+            response.token_type
+        );
+    }
+
+    let expires_in = i64::try_from(response.expires_in)
+        .context("Token refresh returned an unsupported expiration time")?;
+    let expires_at = OffsetDateTime::now_utc()
+        .checked_add(Duration::seconds(expires_in))
+        .context("Token refresh returned an expiration time outside the supported range")?;
+
+    Ok(TokenInfo {
+        access_token: Some(response.access_token),
+        // Google normally omits refresh_token on a refresh response. Preserve
+        // the old value in that case, while accepting a rotated token when one
+        // is returned.
+        refresh_token: Some(
+            response
+                .refresh_token
+                .unwrap_or_else(|| previous_refresh_token.to_string()),
+        ),
+        expires_at: Some(expires_at),
+        id_token: None,
+    })
 }
 
 /// Refresh an access token using reqwest (supports HTTP proxy via environment variables).
@@ -50,7 +85,7 @@ async fn refresh_token_with_reqwest(
     client_id: &str,
     client_secret: &str,
     refresh_token: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<TokenInfo> {
     let client = crate::client::shared_client().map_err(anyhow::Error::from)?;
     let params = [
         ("client_id", client_id),
@@ -77,7 +112,43 @@ async fn refresh_token_with_reqwest(
         .await
         .context("Failed to parse token response")?;
 
-    Ok(token_response.access_token)
+    token_info_from_response(token_response, refresh_token)
+}
+
+/// Return a valid cached token, refreshing and persisting it only when needed.
+///
+/// The normal yup-oauth2 path already provides this behavior. The proxy path
+/// uses reqwest directly because yup-oauth2's hyper client does not honor the
+/// process proxy configuration, so it needs the same cache behavior here.
+async fn cached_token_or_refresh<F, Fut>(
+    storage: &crate::token_storage::EncryptedTokenStorage,
+    scopes: &[&str],
+    refresh: F,
+) -> anyhow::Result<String>
+where
+    F: FnOnce(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<TokenInfo>>,
+{
+    let cached = storage.get(scopes).await;
+    if let Some(token) = cached.as_ref().filter(|token| !token.is_expired()) {
+        if let Some(access_token) = token.access_token.as_deref() {
+            return Ok(access_token.to_string());
+        }
+    }
+
+    let previous_refresh_token = cached.and_then(|token| token.refresh_token);
+    let token = refresh(previous_refresh_token).await?;
+    let access_token = token
+        .access_token
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Token response contained no access token"))?;
+
+    storage
+        .set(scopes, token)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to cache refreshed access token: {e}"))?;
+
+    Ok(access_token)
 }
 
 /// Returns the project ID to be used for quota and billing (sets the `x-goog-user-project` header).
@@ -118,7 +189,7 @@ pub fn get_quota_project() -> Option<String> {
 ///
 /// Note: `dirs::config_dir()` returns `~/Library/Application Support` on macOS, which is
 /// wrong for gcloud. The Google Cloud SDK always uses `~/.config/gcloud` regardless of OS.
-fn adc_well_known_path() -> Option<PathBuf> {
+pub(crate) fn adc_well_known_path() -> Option<PathBuf> {
     dirs::home_dir().map(|d| {
         d.join(".config")
             .join("gcloud")
@@ -226,7 +297,36 @@ pub async fn get_token(scopes: &[&str]) -> anyhow::Result<String> {
     let token_cache = config_dir.join("token_cache.json");
 
     let creds = load_credentials_inner(creds_file.as_deref(), &enc_path, &default_path).await?;
-    get_token_inner(scopes, creds, &token_cache).await
+    get_token_inner(scopes, creds, &token_cache)
+        .await
+        .map_err(add_refresh_token_guidance)
+}
+
+/// Add an actionable explanation when Google rejects the long-lived refresh
+/// token. These failures require a new consent flow; retrying the same token
+/// cannot repair them.
+fn add_refresh_token_guidance(error: anyhow::Error) -> anyhow::Error {
+    let message = format!("{error:#}");
+    if is_refresh_token_error(&message) {
+        anyhow::anyhow!(
+            "{message}\n\nYour saved Google OAuth refresh token is no longer valid. "
+                .to_string()
+                + "Run `gws auth login` once. If this keeps happening after about seven days, "
+                + "set the OAuth app to In production (or Internal for a Workspace organization) "
+                + "instead of Testing in Google Cloud Console. Other causes include revoked access, "
+                + "a password change with Gmail scopes, six months of inactivity, too many live "
+                + "refresh tokens, or an administrator session policy."
+        )
+    } else {
+        error
+    }
+}
+
+pub(crate) fn is_refresh_token_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("invalid_grant")
+        || lower.contains("expired or revoked")
+        || lower.contains("token has been expired")
 }
 
 /// Check if HTTP proxy environment variables are set
@@ -250,11 +350,19 @@ async fn get_token_inner(
             // If proxy env vars are set, use reqwest directly (it supports proxy)
             // This avoids waiting for yup-oauth2's hyper client to timeout
             if has_proxy_env() {
-                return refresh_token_with_reqwest(
-                    &secret.client_id,
-                    &secret.client_secret,
-                    &secret.refresh_token,
-                )
+                let storage = crate::token_storage::EncryptedTokenStorage::new(
+                    token_cache_path.to_path_buf(),
+                );
+                let client_id = secret.client_id.clone();
+                let client_secret = secret.client_secret.clone();
+                let refresh_token = secret.refresh_token.clone();
+
+                return cached_token_or_refresh(&storage, scopes, move |cached_refresh_token| {
+                    let refresh_token = cached_refresh_token.unwrap_or(refresh_token);
+                    async move {
+                        refresh_token_with_reqwest(&client_id, &client_secret, &refresh_token).await
+                    }
+                })
                 .await;
             }
 
@@ -514,6 +622,105 @@ mod tests {
         assert_eq!(body, "(could not read error response body)");
     }
 
+    #[test]
+    fn refresh_token_errors_include_recovery_guidance() {
+        let error =
+            add_refresh_token_guidance(anyhow::anyhow!("Token has been expired or revoked."));
+        let message = error.to_string();
+
+        assert!(message.contains("gws auth login"));
+        assert!(message.contains("In production"));
+    }
+
+    #[test]
+    fn token_info_from_response_preserves_refresh_token_when_omitted() {
+        let token = token_info_from_response(
+            TokenResponse {
+                access_token: "access".to_string(),
+                refresh_token: None,
+                expires_in: 3600,
+                token_type: "Bearer".to_string(),
+            },
+            "refresh",
+        )
+        .unwrap();
+
+        assert_eq!(token.access_token.as_deref(), Some("access"));
+        assert_eq!(token.refresh_token.as_deref(), Some("refresh"));
+        assert!(!token.is_expired());
+    }
+
+    #[test]
+    fn token_info_from_response_rejects_non_bearer_tokens() {
+        let result = token_info_from_response(
+            TokenResponse {
+                access_token: "access".to_string(),
+                refresh_token: None,
+                expires_in: 3600,
+                token_type: "mac".to_string(),
+            },
+            "refresh",
+        );
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported token type"));
+    }
+
+    #[tokio::test]
+    async fn cached_token_or_refresh_reuses_unexpired_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            crate::token_storage::EncryptedTokenStorage::new(dir.path().join("token_cache.json"));
+        let scopes = ["scope"];
+        storage
+            .set(
+                &scopes,
+                TokenInfo {
+                    access_token: Some("cached".to_string()),
+                    refresh_token: Some("refresh".to_string()),
+                    expires_at: Some(OffsetDateTime::now_utc() + Duration::minutes(5)),
+                    id_token: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let token = cached_token_or_refresh(&storage, &scopes, |_| async {
+            panic!("an unexpired token must not be refreshed")
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(token, "cached");
+    }
+
+    #[tokio::test]
+    async fn cached_token_or_refresh_persists_refreshed_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token_cache.json");
+        let storage = crate::token_storage::EncryptedTokenStorage::new(path.clone());
+        let scopes = ["scope"];
+
+        let token = cached_token_or_refresh(&storage, &scopes, |previous| async move {
+            assert_eq!(previous, None);
+            Ok(TokenInfo {
+                access_token: Some("refreshed".to_string()),
+                refresh_token: Some("refresh".to_string()),
+                expires_at: Some(OffsetDateTime::now_utc() + Duration::minutes(5)),
+                id_token: None,
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(token, "refreshed");
+        assert!(path.exists());
+        let cached = storage.get(&scopes).await.unwrap();
+        assert_eq!(cached.access_token.as_deref(), Some("refreshed"));
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn test_load_credentials_no_options() {
@@ -764,7 +971,7 @@ mod tests {
         let enc_path = dir.path().join("credentials.enc");
 
         // Isolate global config dir to prevent races with other tests
-        std::env::set_var("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", dir.path());
+        let _config_guard = EnvVarGuard::set("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", dir.path());
 
         // Encrypt and write
         let encrypted = crate::credential_store::encrypt(json.as_bytes()).unwrap();

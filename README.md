@@ -153,6 +153,15 @@ The CLI supports multiple auth workflows so it works on your laptop, in CI, and 
 
 Credentials are encrypted at rest (AES-256-GCM) with the key stored in your OS keyring (or `~/.config/gws/.encryption_key` when `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file`).
 
+Access tokens are short-lived. `gws` keeps them in its encrypted token cache and
+refreshes them automatically, so a normal access-token refresh should not open
+the browser. If `gws auth login` itself is needed again roughly every seven
+days, the OAuth app is probably still in **Testing**. Google intentionally gives
+test-user refresh tokens a seven-day lifetime. For durable personal use, move
+the app to **In production** in the Cloud Console; for a Google Workspace
+organization, use **Internal** when that audience is available. Production apps
+requesting sensitive or restricted scopes may need Google verification.
+
 ```bash
 gws auth setup       # one-time: creates a Cloud project, enables APIs, logs you in
 gws auth login       # subsequent scope selection and login
@@ -178,8 +187,13 @@ Use this when `gws auth setup` cannot automate project/client creation, or when 
    - OAuth consent screen: `https://console.cloud.google.com/apis/credentials/consent?project=<PROJECT_ID>`
    - Credentials: `https://console.cloud.google.com/apis/credentials?project=<PROJECT_ID>`
 2. Configure OAuth branding/audience if prompted:
-   - App type: **External** (testing mode is fine)
-3. Add your account under **Test users**
+   - App type: **External**
+   - For a long-lived personal setup, set publishing status to **In production**
+     after completing the required app details. Leave **Testing** for temporary
+     development only because test-user authorizations expire after seven days.
+     If the account belongs to a Google Workspace organization, **Internal** is
+     usually the simplest durable option when it is available.
+3. If the app is still **Testing**, add your account under **Test users**
 4. Create an OAuth client:
    - Type: **Desktop app**
 5. Download the client JSON and save it to:
@@ -244,8 +258,42 @@ export GOOGLE_WORKSPACE_CLI_TOKEN=$(gcloud auth print-access-token)
 | 2        | Credentials file       | `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` |
 | 3        | Encrypted credentials  | `gws auth login`                        |
 | 4        | Plaintext credentials  | `~/.config/gws/credentials.json`        |
+| 5        | ADC file from env       | `GOOGLE_APPLICATION_CREDENTIALS`       |
+| 6        | Well-known ADC file     | `gcloud auth application-default login` |
 
 Environment variables can also live in a `.env` file.
+
+The encrypted `gws` credential wins over ADC when both are present. Keep one
+interactive user credential as your normal desktop source; otherwise it is easy
+to forget which account a command is using.
+
+### Google Cloud CLI and Application Default Credentials
+
+Google keeps two separate local credential stores:
+
+- `gcloud auth login` authenticates the **gcloud CLI** itself.
+- `gcloud auth application-default login` creates **Application Default
+  Credentials (ADC)** for applications and client libraries.
+
+They may use the same Google account, but one does not automatically replace the
+other. `gws` can use ADC, including Workspace scopes when you provide the same
+Desktop OAuth client and request the scopes you need:
+
+```bash
+gcloud auth application-default login \
+  --client-id-file="$HOME/.config/gws/client_secret.json" \
+  --scopes="https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/calendar"
+
+# Select that ADC file for gws in this shell, ahead of gws's own saved login.
+export GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE="$HOME/.config/gcloud/application_default_credentials.json"
+```
+
+Use this as an intentional alternative to `gws auth login`, not in addition to
+it. Do not put a raw access token from `gcloud auth print-access-token` in a
+long-lived shell profile: it expires quickly and bypasses `gws`'s refresh cache.
+For unattended Cloud workloads, prefer attached service accounts, service
+account impersonation, or Workload Identity Federation; avoid distributing
+service-account JSON keys unless there is no safer option.
 
 ## AI Agent Skills
 
@@ -409,7 +457,7 @@ All variables are optional. See [`.env.example`](.env.example) for a copy-paste 
 
 | Variable | Description |
 |---|---|
-| `GOOGLE_WORKSPACE_CLI_TOKEN` | Pre-obtained OAuth2 access token (highest priority) |
+| `GOOGLE_WORKSPACE_CLI_TOKEN` | Pre-obtained, short-lived OAuth2 access token (highest priority; bypasses refresh/cache) |
 | `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` | Path to OAuth credentials JSON (user or service account) |
 | `GOOGLE_WORKSPACE_CLI_CLIENT_ID` | OAuth client ID (alternative to `client_secret.json`) |
 | `GOOGLE_WORKSPACE_CLI_CLIENT_SECRET` | OAuth client secret (paired with `CLIENT_ID`) |
@@ -462,6 +510,22 @@ All output — success, errors, download metadata — is structured JSON.
 Your OAuth app is in **testing mode** and your account is not listed as a test user.
 
 **Fix:** Open the [OAuth consent screen](https://console.cloud.google.com/apis/credentials/consent) in your GCP project → **Test users** → **Add users** → enter your Google account email. Then retry `gws auth login`.
+
+### Login is needed again / "Token has been expired or revoked"
+
+The access token and refresh token are different. Access tokens are expected to
+be refreshed automatically. A browser login is needed only when the longer-lived
+refresh token is no longer usable. Google lists these common causes:
+
+- the OAuth app is in **Testing** (test-user authorizations expire after seven days);
+- access was revoked, the password changed while Gmail scopes were granted, or
+  the token was unused for six months;
+- the account reached the per-client live refresh-token limit; or
+- an administrator's Cloud session-control policy expired the session.
+
+Check `gws auth status`, then fix the Cloud Console publishing/audience setting
+before repeatedly running `gws auth login`. Repeated logins can create more live
+refresh tokens and eventually invalidate older ones.
 
 ### "Google hasn't verified this app"
 

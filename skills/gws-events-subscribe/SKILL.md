@@ -20,7 +20,7 @@ Subscribe to Workspace events and stream them as NDJSON
 ## Usage
 
 ```bash
-gws events +subscribe
+gws events +subscribe [OPTIONS]
 ```
 
 ## Flags

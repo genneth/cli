@@ -20,7 +20,7 @@ Weekly summary: this week's meetings + unread email count
 ## Usage
 
 ```bash
-gws workflow +weekly-digest
+gws workflow +weekly-digest [OPTIONS]
 ```
 
 ## Flags
@@ -39,7 +39,9 @@ gws workflow +weekly-digest --format table
 ## Tips
 
 - Read-only — never modifies data.
-- Combines calendar agenda (week) with gmail triage summary.
+- Combines this week's primary calendar with Gmail's unread-email estimate.
+- Calendar events are paginated up to 100 pages; failed requests fail the command.
+- unreadEmailsIsEstimate=true distinguishes the estimate from an exact mailbox count.
 
 ## See Also
 

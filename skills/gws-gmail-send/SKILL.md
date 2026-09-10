@@ -20,7 +20,7 @@ Send an email
 ## Usage
 
 ```bash
-gws gmail +send --to <EMAILS> --subject <SUBJECT> --body <TEXT>
+gws gmail +send [OPTIONS] --to <EMAILS> --subject <SUBJECT> --body <TEXT>
 ```
 
 ## Flags

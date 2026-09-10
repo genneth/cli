@@ -958,6 +958,7 @@ mod tests {
             content_type: "image/png".to_string(),
             size: 100,
             attachment_id: "ATT1".to_string(),
+            data: None,
             content_id: if inline {
                 Some("cid@example.com".to_string())
             } else {

@@ -13,11 +13,13 @@
 // limitations under the License.
 
 use super::Helper;
+pub mod attachment;
+mod content;
 pub mod forward;
 pub mod read;
 pub mod reply;
+mod search;
 pub mod send;
-pub mod attachment;
 pub mod triage;
 pub mod watch;
 
@@ -149,9 +151,9 @@ pub(super) fn strip_angle_brackets(id: &str) -> &str {
 
 /// Metadata for an attachment or inline image from the original message's MIME payload.
 ///
-/// Binary data is NOT stored here — it is fetched separately via `fetch_original_parts`
-/// after the metadata parse, using the `attachment_id`.
-#[derive(Debug, Clone)]
+/// Embedded bytes are retained internally; remote bytes are fetched separately
+/// using `attachment_id`. Serialization exposes metadata only.
+#[derive(Debug, Clone, Serialize)]
 pub(super) struct OriginalPart {
     /// Filename from the MIME part. Synthesized as `"part-{index}.{ext}"` when absent.
     pub filename: String,
@@ -161,6 +163,9 @@ pub(super) struct OriginalPart {
     pub size: u64,
     /// Gmail API attachment ID for fetching binary data.
     pub attachment_id: String,
+    /// Bytes included directly in Gmail's payload, never printed in metadata.
+    #[serde(skip)]
+    pub data: Option<Vec<u8>>,
     /// Content-ID for inline images (bare, no angle brackets).
     /// When present, the part is an inline image referenced via `cid:` URLs in the HTML body.
     /// When absent, the part is a regular file attachment.
@@ -177,9 +182,9 @@ impl OriginalPart {
 
 /// A parsed Gmail message fetched via the API, used as context for reply/forward.
 ///
-/// `from` is always populated — `parse_original_message` returns an error when
-/// `From` is missing. `body_text` always has a value — it falls back to the
-/// message snippet when no `text/plain` MIME part is found. Semantically optional
+/// Reply/forward validate required headers at their boundary; reading accepts
+/// missing headers. `body_text` is decoded plain text or converted HTML, never
+/// a snippet. Semantically optional
 /// fields (`cc`, `reply_to`, `date`, `body_html`) use `Option` so the compiler
 /// enforces absence checks.
 #[derive(Default, Serialize)]
@@ -260,15 +265,15 @@ fn parse_message_headers(headers: &[Value]) -> ParsedMessageHeaders {
         let name = header.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let value = header.get("value").and_then(|v| v.as_str()).unwrap_or("");
 
-        match name {
-            "From" => parsed.from = value.to_string(),
-            "Reply-To" => append_address_list_header_value(&mut parsed.reply_to, value),
-            "To" => append_address_list_header_value(&mut parsed.to, value),
-            "Cc" => append_address_list_header_value(&mut parsed.cc, value),
-            "Subject" => parsed.subject = value.to_string(),
-            "Date" => parsed.date = value.to_string(),
-            "Message-ID" | "Message-Id" => parsed.message_id = value.to_string(),
-            "References" => append_header_value(&mut parsed.references, value),
+        match name.to_ascii_lowercase().as_str() {
+            "from" => parsed.from = value.to_string(),
+            "reply-to" => append_address_list_header_value(&mut parsed.reply_to, value),
+            "to" => append_address_list_header_value(&mut parsed.to, value),
+            "cc" => append_address_list_header_value(&mut parsed.cc, value),
+            "subject" => parsed.subject = value.to_string(),
+            "date" => parsed.date = value.to_string(),
+            "message-id" => parsed.message_id = value.to_string(),
+            "references" => append_header_value(&mut parsed.references, value),
             _ => {}
         }
     }
@@ -294,18 +299,29 @@ pub(super) fn non_empty_slice<T>(s: &[T]) -> Option<&[T]> {
     }
 }
 
+#[cfg(test)]
 fn parse_original_message(msg: &Value) -> Result<OriginalMessage, GwsError> {
+    let message = parse_message(msg)?;
+    validate_reply_headers(&message)?;
+    Ok(message)
+}
+
+fn validate_reply_headers(message: &OriginalMessage) -> Result<(), GwsError> {
+    if message.from.email.is_empty() {
+        return Err(anyhow::anyhow!("Message is missing From header").into());
+    }
+    if message.message_id.is_empty() {
+        return Err(anyhow::anyhow!("Message is missing Message-ID header").into());
+    }
+    Ok(())
+}
+
+fn parse_message(msg: &Value) -> Result<OriginalMessage, GwsError> {
     let thread_id = msg
         .get("threadId")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from);
-
-    let snippet = msg
-        .get("snippet")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
 
     let parsed_headers = msg
         .get("payload")
@@ -314,29 +330,29 @@ fn parse_original_message(msg: &Value) -> Result<OriginalMessage, GwsError> {
         .map(|headers| parse_message_headers(headers))
         .unwrap_or_default();
 
-    if parsed_headers.from.is_empty() {
-        return Err(GwsError::Other(anyhow::anyhow!(
-            "Message is missing From header"
-        )));
-    }
-
     let message_id = strip_angle_brackets(&parsed_headers.message_id);
-    if message_id.is_empty() {
-        return Err(GwsError::Other(anyhow::anyhow!(
-            "Message is missing Message-ID header"
-        )));
-    }
 
     let PayloadContents {
         body_text: extracted_text,
         body_html,
         parts: original_parts,
+        errors,
     } = msg
         .get("payload")
         .map(extract_payload_contents)
         .unwrap_or_default();
 
-    let body_text = extracted_text.unwrap_or(snippet);
+    if !errors.is_empty() {
+        return Err(anyhow::anyhow!("Cannot read complete message: {}", errors.join("; ")).into());
+    }
+    let body_text = match extracted_text {
+        Some(text) => text,
+        None => match &body_html {
+            Some(html) => html2text::from_read(html.as_bytes(), 100)
+                .context("Failed to convert HTML message to text")?,
+            None => String::new(),
+        },
+    };
 
     // Parse references: split on whitespace and strip any angle brackets, producing bare IDs
     let references = parsed_headers
@@ -371,39 +387,9 @@ pub(super) async fn fetch_message_metadata(
     token: &str,
     message_id: &str,
 ) -> Result<OriginalMessage, GwsError> {
-    let url = format!(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages/{}",
-        crate::validate::encode_path_segment(message_id)
-    );
-
-    let resp = crate::client::send_with_retry(|| {
-        client
-            .get(&url)
-            .bearer_auth(token)
-            .query(&[("format", "full")])
-    })
-    .await
-    .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to fetch message: {e}")))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "(error body unreadable)".to_string());
-        return Err(build_api_error(
-            status,
-            &body,
-            &format!("Failed to fetch message {message_id}"),
-        ));
-    }
-
-    let msg: Value = resp
-        .json()
-        .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse message: {e}")))?;
-
-    parse_original_message(&msg)
+    let message = content::fetch_message(client, token, message_id).await?;
+    validate_reply_headers(&message.message)?;
+    Ok(message.message)
 }
 
 /// Build a `GwsError::Api` from an HTTP error response body, parsing the
@@ -698,8 +684,15 @@ pub(super) async fn fetch_attachment_data(
         crate::validate::encode_path_segment(message_id),
         crate::validate::encode_path_segment(attachment_id),
     );
+    fetch_attachment_at(client, token, &url).await
+}
 
-    let resp = crate::client::send_with_retry(|| client.get(&url).bearer_auth(token))
+pub(super) async fn fetch_attachment_at(
+    client: &reqwest::Client,
+    token: &str,
+    url: &str,
+) -> Result<Vec<u8>, GwsError> {
+    let resp = crate::client::send_with_retry(|| client.get(url).bearer_auth(token))
         .await
         .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to fetch attachment: {e}")))?;
 
@@ -709,11 +702,7 @@ pub(super) async fn fetch_attachment_data(
             .text()
             .await
             .unwrap_or_else(|_| "(error body unreadable)".to_string());
-        return Err(build_api_error(
-            status,
-            &err,
-            &format!("Failed to fetch attachment {attachment_id} from message {message_id}"),
-        ));
+        return Err(build_api_error(status, &err, "Failed to fetch attachment"));
     }
 
     let body: Value = resp
@@ -722,14 +711,10 @@ pub(super) async fn fetch_attachment_data(
         .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to parse attachment JSON: {e}")))?;
 
     let data_str = body.get("data").and_then(|v| v.as_str()).ok_or_else(|| {
-        GwsError::Other(anyhow::anyhow!(
-            "Attachment response missing 'data' field for {attachment_id}"
-        ))
+        GwsError::Other(anyhow::anyhow!("Attachment response missing 'data' field"))
     })?;
 
-    URL_SAFE
-        .decode(data_str)
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("Failed to decode attachment data: {e}")))
+    decode_binary(data_str)
 }
 
 /// Fetch binary data for selected original parts, converting them to `Attachment`s.
@@ -765,7 +750,10 @@ pub(super) async fn fetch_original_parts(
     let mut actual_bytes = existing_bytes;
 
     for part in parts {
-        let data = fetch_attachment_data(client, token, message_id, &part.attachment_id).await?;
+        let data = match &part.data {
+            Some(data) => data.clone(),
+            None => fetch_attachment_data(client, token, message_id, &part.attachment_id).await?,
+        };
 
         actual_bytes += data.len() as u64;
         if actual_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
@@ -815,29 +803,38 @@ struct PayloadContents {
     body_text: Option<String>,
     body_html: Option<String>,
     parts: Vec<OriginalPart>,
+    errors: Vec<String>,
 }
 
-/// Decode a base64url-encoded text body part, returning the string on success.
-fn decode_text_body(data: &str, mime_label: &str) -> Option<String> {
-    match URL_SAFE.decode(data) {
-        Ok(decoded) => match String::from_utf8(decoded) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                eprintln!(
-                    "Warning: {mime_label} body is not valid UTF-8: {}",
-                    sanitize_for_terminal(&e.to_string())
-                );
-                None
-            }
-        },
-        Err(e) => {
-            eprintln!(
-                "Warning: {mime_label} body has invalid base64: {}",
-                sanitize_for_terminal(&e.to_string())
-            );
-            None
-        }
-    }
+/// Decode either padded or unpadded Gmail base64url data.
+fn decode_binary(data: &str) -> Result<Vec<u8>, GwsError> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    URL_SAFE
+        .decode(data)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(data))
+        .context("Invalid base64url MIME data")
+        .map_err(Into::into)
+}
+
+fn decode_text_body(data: &str, part: &Value) -> Result<String, GwsError> {
+    let bytes = decode_binary(data)?;
+    let content_type = get_part_header(part, "Content-Type").unwrap_or("");
+    let charset = content_type
+        .split(';')
+        .skip(1)
+        .find_map(|param| {
+            let (key, value) = param.trim().split_once('=')?;
+            key.trim()
+                .eq_ignore_ascii_case("charset")
+                .then(|| value.trim().trim_matches('"'))
+        })
+        .unwrap_or("utf-8");
+    let encoding = encoding_rs::Encoding::for_label(charset.as_bytes())
+        .ok_or_else(|| anyhow::anyhow!("Unsupported MIME charset {charset}"))?;
+    encoding
+        .decode_without_bom_handling_and_without_replacement(&bytes)
+        .map(|s| s.into_owned())
+        .ok_or_else(|| anyhow::anyhow!("Invalid text for MIME charset {charset}").into())
 }
 
 /// Synthesize a filename from the part index and MIME type when no filename is present.
@@ -852,6 +849,9 @@ fn synthesize_filename(part_index: usize, mime_type: &str) -> String {
             "octet-stream" => "bin",
             other => other,
         })
+        .filter(|ext| {
+            !ext.is_empty() && ext.len() <= 16 && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        })
         .unwrap_or("bin");
     format!("part-{part_index}.{ext}")
 }
@@ -860,9 +860,25 @@ fn synthesize_filename(part_index: usize, mime_type: &str) -> String {
 /// a synthesized name if the result is empty. Unlike `--attach` (where we reject
 /// bad paths), remote filenames are sender-controlled and should not fail the operation.
 fn sanitize_remote_filename(raw: &str, part_index: usize, mime_type: &str) -> String {
-    let cleaned: String = raw.chars().filter(|c| !c.is_ascii_control()).collect();
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control() && !crate::validate::is_dangerous_unicode(*c))
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
     let cleaned = cleaned.trim();
-    if cleaned.is_empty() {
+    // Leave room for collision suffixes on filesystems with 255-byte component limits.
+    let mut end = cleaned.len().min(200);
+    while !cleaned.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cleaned = &cleaned[..end];
+    if cleaned.is_empty() || matches!(cleaned, "." | "..") {
         synthesize_filename(part_index, mime_type)
     } else {
         cleaned.to_string()
@@ -922,18 +938,32 @@ fn extract_payload_recursive(
     let is_hydratable = !attachment_id.is_empty();
 
     // A body text part has inline body.data, no attachmentId, no filename, and no Content-ID.
-    let is_body_text_part =
-        !is_hydratable && filename.is_empty() && content_id_header.is_none() && body_data.is_some();
+    let is_body_text_part = is_body_part(part);
 
     if is_body_text_part {
-        // body_data is guaranteed Some by the is_body_text_part check above.
-        let data = body_data.unwrap();
-        if mime_type == "text/plain" && contents.body_text.is_none() {
-            contents.body_text = decode_text_body(data, "text/plain");
-        } else if mime_type == "text/html" && contents.body_html.is_none() {
-            contents.body_html = decode_text_body(data, "text/html");
+        let decoded = match body_data {
+            Some(data) => decode_text_body(data, part),
+            None if body_size == 0 && !is_hydratable => Ok(String::new()),
+            None => Err(anyhow::anyhow!("Body part must be fetched before decoding").into()),
+        };
+        match decoded {
+            Ok(text) => {
+                let dest = if mime_type.eq_ignore_ascii_case("text/plain") {
+                    &mut contents.body_text
+                } else {
+                    &mut contents.body_html
+                };
+                match dest {
+                    Some(existing) => {
+                        existing.push('\n');
+                        existing.push_str(&text);
+                    }
+                    None => *dest = Some(text),
+                }
+            }
+            Err(e) => contents.errors.push(e.to_string()),
         }
-    } else if is_hydratable {
+    } else if is_hydratable || body_data.is_some() {
         // This part has fetchable data — classify as inline or attachment
         let index = *part_counter;
         *part_counter += 1;
@@ -975,6 +1005,13 @@ fn extract_payload_recursive(
             },
             size: body_size,
             attachment_id: attachment_id.to_string(),
+            data: body_data.and_then(|data| match decode_binary(data) {
+                Ok(data) => Some(data),
+                Err(e) => {
+                    contents.errors.push(e.to_string());
+                    None
+                }
+            }),
             content_id,
         });
         // Do NOT recurse into hydratable parts. A message/rfc822 attachment or
@@ -989,6 +1026,22 @@ fn extract_payload_recursive(
             }
         }
     }
+}
+
+/// Text attachments and encapsulated messages are never promoted to body text.
+fn is_body_part(part: &Value) -> bool {
+    let mime = part.get("mimeType").and_then(Value::as_str).unwrap_or("");
+    (mime.eq_ignore_ascii_case("text/plain") || mime.eq_ignore_ascii_case("text/html"))
+        && part
+            .get("filename")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+        && !get_part_header(part, "Content-Disposition")
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .starts_with("attachment")
+        && get_part_header(part, "Content-ID").is_none()
 }
 
 /// Resolve the HTML body for quoting or forwarding: use the original HTML
@@ -1657,7 +1710,7 @@ TIPS:
 EXAMPLES:
   gws gmail +triage
   gws gmail +triage --max 5 --query 'from:boss'
-  gws gmail +triage --format json | jq '.[].subject'
+  gws gmail +triage --format json | jq '.messages[].subject'
   gws gmail +triage --labels
 
 TIPS:
@@ -1794,14 +1847,20 @@ Use fragment tags (<p>, <b>, <a>, etc.) — no <html>/<body> wrapper needed.
 
         cmd = cmd.subcommand(
             Command::new("+read")
-                .about("[Helper] Read a message and extract its body or headers")
+                .override_usage("gws gmail +read (--id <ID> | --thread-id <ID>) [OPTIONS]")
+                .about("[Helper] Read a complete message or conversation with decoded bodies and attachment metadata")
                 .arg(
                     Arg::new("id")
                         .long("id")
                         .alias("message-id")
-                        .required(true)
+                        .required_unless_present("thread-id")
+                        .conflicts_with("thread-id")
                         .help("The Gmail message ID to read")
                         .value_name("ID"),
+                )
+                .arg(
+                    Arg::new("thread-id").long("thread-id")
+                        .help("Read every message in this Gmail thread").value_name("ID"),
                 )
                 .arg(
                     Arg::new("headers")
@@ -1833,13 +1892,20 @@ Use fragment tags (<p>, <b>, <a>, etc.) — no <html>/<body> wrapper needed.
 EXAMPLES:
   gws gmail +read --id 18f1a2b3c4d
   gws gmail +read --id 18f1a2b3c4d --headers
-  gws gmail +read --id 18f1a2b3c4d --format json | jq '.body'
+  gws gmail +read --id 18f1a2b3c4d --format json | jq '.body_text'
+  gws gmail +read --thread-id THREAD_ID --format json
 
 TIPS:
   Converts HTML-only messages to plain text automatically.
-  Handles multipart/alternative and base64 decoding.",
+  Handles multipart/alternative, charset decoding, and externally stored body parts.
+  Choose exactly one of --id or --thread-id. Thread JSON contains a messages array.
+  JSON id is the Gmail API ID; rfc_message_id and the legacy message_id are RFC mail headers.
+  JSON includes body_text, body_html, label_ids, and attachments; attachment bytes are downloaded with +attachment.
+  Missing or undecodable content fails visibly; snippets are never substituted for full bodies.",
                 ),
         );
+
+        cmd = cmd.subcommand(search::command());
 
         cmd = cmd.subcommand(
             Command::new("+attachment")
@@ -1882,6 +1948,8 @@ TIPS:
                         .help("Output directory for downloaded files")
                         .value_name("DIR"),
                 )
+                .arg(Arg::new("format").long("format").default_value("json").value_parser(["json", "text"])
+                    .help("Output format; JSON reports saved file paths and metadata"))
                 .arg(
                     Arg::new("dry-run")
                         .long("dry-run")
@@ -1893,6 +1961,11 @@ TIPS:
 EXAMPLES:
   gws gmail +attachment --message-id MSG_ID --name invoice.pdf --output ./invoice.pdf
   gws gmail +attachment --message-id MSG_ID --all --output-dir ./downloads/
+
+TIPS:
+  JSON output contains files with saved paths, sizes, and MIME types. Use --format text for human output.
+  Output paths must stay under the current directory. Existing files are preserved with numbered filenames.
+  Supports embedded and separately stored attachments, including inline images. Total download limit: 25 MB.
 ",
                 )
         );
@@ -2018,6 +2091,10 @@ TIPS:
                 handle_read(doc, matches).await?;
                 return Ok(true);
             }
+            if let Some(matches) = matches.subcommand_matches("+search") {
+                search::handle_search(matches).await?;
+                return Ok(true);
+            }
 
             if let Some(matches) = matches.subcommand_matches("+attachment") {
                 handle_attachment(doc, matches).await?;
@@ -2038,6 +2115,70 @@ TIPS:
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn read_selectors_and_search_bounds_use_real_command_registration() {
+        let doc = crate::discovery::RestDescription {
+            name: "gmail".into(),
+            ..Default::default()
+        };
+        let command = crate::commands::build_cli(&doc);
+        command.clone().debug_assert();
+        assert!(command
+            .clone()
+            .try_get_matches_from(["gmail", "+read", "--thread-id", "t"])
+            .is_ok());
+        assert!(command
+            .clone()
+            .try_get_matches_from(["gmail", "+read"])
+            .is_err());
+        assert!(command
+            .clone()
+            .try_get_matches_from(["gmail", "+read", "--id", "m", "--thread-id", "t"])
+            .is_err());
+        assert!(command
+            .clone()
+            .try_get_matches_from(["gmail", "+search", "--max-messages", "0"])
+            .is_err());
+        assert!(command
+            .clone()
+            .try_get_matches_from(["gmail", "+search", "--page-limit", "101"])
+            .is_err());
+        assert!(command
+            .try_get_matches_from(["gmail", "+search", "--params", r#"{"q":"from:alice"}"#])
+            .is_ok());
+    }
+
+    #[test]
+    fn html_only_message_returns_complete_text_not_snippet() {
+        let msg = json!({"snippet":"short", "payload": {
+            "mimeType":"text/html", "headers":[
+                {"name":"From","value":"a@example.com"},
+                {"name":"Message-ID","value":"<rfc@example.com>"}],
+            "body":{"data":URL_SAFE.encode("<p>Complete body &amp; details</p>")}
+        }});
+        let parsed = parse_original_message(&msg).unwrap();
+        assert!(parsed.body_text.contains("Complete body & details"));
+        assert!(!parsed.body_text.contains("short"));
+    }
+
+    #[test]
+    fn embedded_attachment_is_not_lost() {
+        let parts = extract_payload_contents(&json!({
+            "mimeType":"application/pdf", "filename":"invoice.pdf",
+            "body":{"data":URL_SAFE.encode(b"pdf"),"size":3}
+        }));
+        assert_eq!(parts.parts.len(), 1);
+        assert_eq!(parts.parts[0].filename, "invoice.pdf");
+    }
+
+    #[test]
+    fn sender_filename_cannot_escape_download_directory() {
+        let name = sanitize_remote_filename("../../outside.pdf", 0, "application/pdf");
+        assert_eq!(std::path::Path::new(&name).components().count(), 1);
+        assert!(!name.contains('/'));
+        assert!(!name.contains('\\'));
+    }
 
     /// Test-only wrapper: extract the plain text body from a payload using the single-pass walker.
     fn extract_plain_text_body(payload: &Value) -> Option<String> {
@@ -2288,8 +2429,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_original_message_snippet_fallback() {
-        // When only text/html is present (no text/plain), body_text falls back to snippet
+    fn test_parse_original_message_html_fallback() {
+        // HTML-only messages must retain the complete body, including for replies.
         let msg = json!({
             "threadId": "t1",
             "snippet": "Snippet fallback text",
@@ -2303,7 +2444,7 @@ mod tests {
             }
         });
         let original = parse_original_message(&msg).unwrap();
-        assert_eq!(original.body_text, "Snippet fallback text");
+        assert_eq!(original.body_text.trim(), "HTML only");
         assert_eq!(original.body_html.unwrap(), "<p>HTML only</p>");
     }
 
@@ -2487,7 +2628,7 @@ mod tests {
             original.references,
             vec!["ref-1@example.com", "ref-2@example.com"]
         );
-        assert_eq!(original.body_text, "Snippet fallback");
+        assert_eq!(original.body_text.trim(), "HTML only");
         assert_eq!(original.body_html.as_deref(), Some("<p>HTML only</p>"));
     }
 

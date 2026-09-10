@@ -20,7 +20,7 @@ create a new event
 ## Usage
 
 ```bash
-gws calendar +insert --summary <TEXT> --start <TIME> --end <TIME>
+gws calendar +insert [OPTIONS] --summary <TEXT> --start <TIME> --end <TIME>
 ```
 
 ## Flags

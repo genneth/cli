@@ -20,19 +20,26 @@ pub(super) async fn handle_read(
     _doc: &crate::discovery::RestDescription,
     matches: &ArgMatches,
 ) -> Result<(), GwsError> {
-    let message_id = matches.get_one::<String>("id").unwrap();
-
-    let dry_run = matches.get_flag("dry-run");
-
-    let original = if dry_run {
-        OriginalMessage::dry_run_placeholder(message_id)
+    let message_id = matches.get_one::<String>("id");
+    let thread_id = matches.get_one::<String>("thread-id");
+    if matches.get_flag("dry-run") {
+        println!(
+            "{}",
+            json!({"dryRun":true,"id":message_id,"threadId":thread_id})
+        );
+        return Ok(());
+    }
+    let token = auth::get_token(&[GMAIL_READONLY_SCOPE])
+        .await
+        .map_err(|e| GwsError::Auth(format!("Gmail auth failed: {e}")))?;
+    let client = crate::client::build_client()?;
+    let messages = if let Some(id) = thread_id {
+        content::fetch_thread(&client, &token, id).await?
     } else {
-        let t = auth::get_token(&[GMAIL_READONLY_SCOPE])
-            .await
-            .map_err(|e| GwsError::Auth(format!("Gmail auth failed: {e}")))?;
-
-        let client = crate::client::build_client()?;
-        fetch_message_metadata(&client, &t, message_id).await?
+        vec![
+            content::fetch_message(&client, &token, message_id.context("Missing message id")?)
+                .await?,
+        ]
     };
 
     let format = matches.get_one::<String>("format").unwrap();
@@ -42,13 +49,38 @@ pub(super) async fn handle_read(
     let mut stdout = io::stdout().lock();
 
     if format == "json" {
-        let json_output = serde_json::to_string_pretty(&original)
-            .context("Failed to serialize message to JSON")?;
+        let value = if let Some(id) = thread_id {
+            json!({"thread_id":id,"messages":messages,"complete":true})
+        } else {
+            serde_json::to_value(&messages[0]).context("Failed to serialize message")?
+        };
+        let json_output =
+            serde_json::to_string_pretty(&value).context("Failed to serialize message to JSON")?;
         writeln!(stdout, "{}", json_output).context("Failed to write JSON output")?;
         return Ok(());
     }
 
+    for message in &messages {
+        write_message(
+            &mut stdout,
+            message,
+            show_headers || thread_id.is_some(),
+            use_html,
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn write_message(
+    stdout: &mut impl Write,
+    message: &content::ReadMessage,
+    show_headers: bool,
+    use_html: bool,
+) -> Result<(), GwsError> {
+    let original = &message.message;
     if show_headers {
+        writeln!(stdout, "Gmail ID: {}", sanitize_for_terminal(&message.id))
+            .context("Failed to write ID")?;
         // Format structured fields into display strings for header output.
         let from_str = original.from.to_string();
         let to_str = format_mailbox_list(&original.to);
@@ -80,8 +112,13 @@ pub(super) async fn handle_read(
     if !original.parts.is_empty() {
         writeln!(stdout, "Attachments:").context("Failed to write attachments header")?;
         for part in &original.parts {
-            writeln!(stdout, "  - {} ({} bytes, ID: {})", part.filename, part.size, part.attachment_id)
-                .context("Failed to write attachment details")?;
+            writeln!(
+                stdout,
+                "  - {} ({} bytes)",
+                sanitize_for_terminal(&part.filename),
+                part.size
+            )
+            .context("Failed to write attachment details")?;
         }
         writeln!(stdout, "---").context("Failed to write attachments separator")?;
     }

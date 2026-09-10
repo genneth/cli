@@ -20,7 +20,7 @@ Forward a message to new recipients
 ## Usage
 
 ```bash
-gws gmail +forward --message-id <ID> --to <EMAILS>
+gws gmail +forward [OPTIONS] --message-id <ID> --to <EMAILS>
 ```
 
 ## Flags

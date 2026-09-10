@@ -20,7 +20,7 @@ Append a row to a spreadsheet
 ## Usage
 
 ```bash
-gws sheets +append --spreadsheet <ID>
+gws sheets +append [OPTIONS] --spreadsheet <ID>
 ```
 
 ## Flags

@@ -20,7 +20,7 @@ Upload local files to an Apps Script project
 ## Usage
 
 ```bash
-gws script +push --script <ID>
+gws script +push [OPTIONS] --script <ID>
 ```
 
 ## Flags

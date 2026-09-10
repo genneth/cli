@@ -793,32 +793,12 @@ metadata:
 
     out.push_str(&format!("{about}\n\n"));
 
-    // Usage
-    out.push_str("## Usage\n\n");
-    out.push_str(&format!("```bash\ngws {alias} {cmd_name}"));
-
-    // Show required args inline
-    let args: Vec<_> = cmd
-        .get_arguments()
-        .filter(|a| a.get_id() != "help")
-        .collect();
-    for arg in &args {
-        if arg.is_required_set() {
-            if let Some(long) = arg.get_long() {
-                let val_name = arg
-                    .get_value_names()
-                    .and_then(|v| v.first())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "VALUE".to_string());
-                out.push_str(&format!(" --{long} <{val_name}>"));
-            } else {
-                let id = arg.get_id().as_str();
-                out.push_str(&format!(" <{id}>"));
-            }
-        }
-    }
-
+    // Let clap describe required groups and alternative selectors as well as plain arguments.
+    let usage = cmd.clone().bin_name(format!("gws {alias} {cmd_name}")).render_usage().to_string();
+    out.push_str("## Usage\n\n```bash\n");
+    out.push_str(usage.strip_prefix("Usage: ").unwrap_or(&usage));
     out.push_str("\n```\n\n");
+    let args: Vec<_> = cmd.get_arguments().filter(|a| a.get_id() != "help").collect();
 
     // Flags table
     if !args.is_empty() {
@@ -1631,5 +1611,14 @@ mod tests {
             fm.contains("- gws"),
             "frontmatter should contain '- gws' block entry"
         );
+    }
+
+    #[test]
+    fn helper_skill_preserves_usage_with_alternative_selectors() {
+        let entry = services::SERVICES.iter().find(|s| s.api_name == "gmail").unwrap();
+        let usage = "gws gmail +read (--id <ID> | --thread-id <ID>) [OPTIONS]";
+        let cmd = Command::new("+read").override_usage(usage);
+        let md = render_helper_skill("gmail", "+read", &cmd, entry, "Gmail");
+        assert!(md.contains(usage));
     }
 }

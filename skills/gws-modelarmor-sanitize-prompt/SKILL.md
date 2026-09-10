@@ -20,7 +20,7 @@ Sanitize a user prompt through a Model Armor template
 ## Usage
 
 ```bash
-gws modelarmor +sanitize-prompt --template <NAME>
+gws modelarmor +sanitize-prompt [OPTIONS] --template <NAME>
 ```
 
 ## Flags

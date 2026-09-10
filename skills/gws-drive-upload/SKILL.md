@@ -20,7 +20,7 @@ Upload a file with automatic metadata
 ## Usage
 
 ```bash
-gws drive +upload <file>
+gws drive +upload [OPTIONS] <file>
 ```
 
 ## Flags

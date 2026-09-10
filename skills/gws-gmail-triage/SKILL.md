@@ -20,7 +20,7 @@ Show unread inbox summary (sender, subject, date)
 ## Usage
 
 ```bash
-gws gmail +triage
+gws gmail +triage [OPTIONS]
 ```
 
 ## Flags
@@ -36,7 +36,7 @@ gws gmail +triage
 ```bash
 gws gmail +triage
 gws gmail +triage --max 5 --query 'from:boss'
-gws gmail +triage --format json | jq '.[].subject'
+gws gmail +triage --format json | jq '.messages[].subject'
 gws gmail +triage --labels
 ```
 

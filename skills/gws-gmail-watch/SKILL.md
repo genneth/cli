@@ -20,7 +20,7 @@ Watch for new emails and stream them as NDJSON
 ## Usage
 
 ```bash
-gws gmail +watch
+gws gmail +watch [OPTIONS]
 ```
 
 ## Flags

@@ -28,7 +28,8 @@ gws gmail <resource> <method> [flags]
 | [`+reply`](../gws-gmail-reply/SKILL.md) | Reply to a message (handles threading automatically) |
 | [`+reply-all`](../gws-gmail-reply-all/SKILL.md) | Reply-all to a message (handles threading automatically) |
 | [`+forward`](../gws-gmail-forward/SKILL.md) | Forward a message to new recipients |
-| [`+read`](../gws-gmail-read/SKILL.md) | Read a message and extract its body or headers |
+| [`+read`](../gws-gmail-read/SKILL.md) | Read a complete message or conversation with decoded bodies and attachment metadata |
+| [`+search`](../gws-gmail-search/SKILL.md) | Search Gmail and retrieve complete readable messages |
 | [`+attachment`](../gws-gmail-attachment/SKILL.md) | Download email attachments by name or download all attachments |
 | [`+watch`](../gws-gmail-watch/SKILL.md) | Watch for new emails and stream them as NDJSON |
 

@@ -20,7 +20,7 @@ Convert a Gmail message into a Google Tasks entry
 ## Usage
 
 ```bash
-gws workflow +email-to-task --message-id <ID>
+gws workflow +email-to-task [OPTIONS] --message-id <ID>
 ```
 
 ## Flags

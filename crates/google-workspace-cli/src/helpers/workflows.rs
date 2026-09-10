@@ -18,7 +18,6 @@
 use super::Helper;
 use crate::auth;
 use crate::error::GwsError;
-use crate::output::sanitize_for_terminal;
 use clap::{Arg, ArgMatches, Command};
 use serde_json::{json, Value};
 use std::future::Future;
@@ -98,7 +97,8 @@ EXAMPLES:
 
 TIPS:
   Read-only — never modifies data.
-  Combines calendar agenda (today) with tasks list.",
+  Combines today's primary calendar with the default task list; follows all pages up to 100 per list.
+  JSON preserves event/task IDs and source IDs. A failed source fails the command, never reports an empty list.",
         )
 }
 
@@ -178,7 +178,9 @@ EXAMPLES:
 
 TIPS:
   Read-only — never modifies data.
-  Combines calendar agenda (week) with gmail triage summary.",
+  Combines this week's primary calendar with Gmail's unread-email estimate.
+  Calendar events are paginated up to 100 pages; failed requests fail the command.
+  unreadEmailsIsEstimate=true distinguishes the estimate from an exact mailbox count.",
         )
 }
 
@@ -229,35 +231,7 @@ TIPS:
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn get_json(
-    client: &reqwest::Client,
-    url: &str,
-    token: &str,
-    query: &[(&str, &str)],
-) -> Result<Value, GwsError> {
-    let resp = client
-        .get(url)
-        .query(query)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("HTTP request failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(GwsError::Api {
-            code: status.as_u16(),
-            message: body,
-            reason: "workflow_request_failed".to_string(),
-            enable_url: None,
-        });
-    }
-
-    resp.json::<Value>()
-        .await
-        .map_err(|e| GwsError::Other(anyhow::anyhow!("JSON parse failed: {e}")))
-}
+use crate::helpers::retrieval::{event_summary, get_json, list_all};
 
 fn format_and_print(value: &Value, matches: &ArgMatches) {
     let fmt = matches
@@ -285,7 +259,7 @@ async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
     let time_max = today_end_tz.to_rfc3339();
 
     // Fetch today's events
-    let events_json = get_json(
+    let events = list_all(
         &client,
         "https://www.googleapis.com/calendar/v3/calendars/primary/events",
         &token,
@@ -296,57 +270,28 @@ async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
             ("orderBy", "startTime"),
             ("maxResults", "25"),
         ],
+        "items",
     )
-    .await
-    .inspect_err(|e| {
-        eprintln!(
-            "Warning: Failed to fetch calendar events: {}",
-            sanitize_for_terminal(&e.to_string())
-        );
-    })
-    .unwrap_or(json!({}));
-    let events = events_json
-        .get("items")
-        .and_then(|i| i.as_array())
-        .cloned()
-        .unwrap_or_default();
+    .await?;
 
-    let meetings: Vec<Value> = events
-        .iter()
-        .map(|e| {
-            json!({
-                "summary": e.get("summary").and_then(|v| v.as_str()).unwrap_or("(No title)"),
-                "start": e.get("start").and_then(|s| s.get("dateTime").or(s.get("date"))).and_then(|v| v.as_str()).unwrap_or(""),
-                "end": e.get("end").and_then(|s| s.get("dateTime").or(s.get("date"))).and_then(|v| v.as_str()).unwrap_or(""),
-            })
-        })
-        .collect();
+    let meetings: Vec<Value> = events.iter().map(|e| event_summary(e, "primary")).collect();
 
     // Fetch open tasks
-    let tasks_json = get_json(
+    let tasks = list_all(
         &client,
         "https://tasks.googleapis.com/tasks/v1/lists/@default/tasks",
         &token,
         &[("showCompleted", "false"), ("maxResults", "20")],
+        "items",
     )
-    .await
-    .inspect_err(|e| {
-        eprintln!(
-            "Warning: Failed to fetch tasks: {}",
-            sanitize_for_terminal(&e.to_string())
-        );
-    })
-    .unwrap_or(json!({}));
-    let tasks = tasks_json
-        .get("items")
-        .and_then(|i| i.as_array())
-        .cloned()
-        .unwrap_or_default();
+    .await?;
 
     let open_tasks: Vec<Value> = tasks
         .iter()
         .map(|t| {
             json!({
+                "id": t.get("id"),
+                "taskListId": "@default",
                 "title": t.get("title").and_then(|v| v.as_str()).unwrap_or(""),
                 "due": t.get("due").and_then(|v| v.as_str()).unwrap_or(""),
             })
@@ -355,6 +300,8 @@ async fn handle_standup_report(matches: &ArgMatches) -> Result<(), GwsError> {
 
     let output = json!({
         "meetings": meetings,
+        "complete": true,
+        "calendarId": "primary",
         "meetingCount": meetings.len(),
         "tasks": open_tasks,
         "taskCount": open_tasks.len(),
@@ -397,11 +344,7 @@ async fn handle_meeting_prep(matches: &ArgMatches) -> Result<(), GwsError> {
         ],
     )
     .await?;
-    let items = events_json
-        .get("items")
-        .and_then(|i| i.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let items = crate::helpers::retrieval::page_items(&events_json, "items")?;
 
     if items.is_empty() {
         let output = json!({ "message": "No upcoming meetings found." });
@@ -427,6 +370,9 @@ async fn handle_meeting_prep(matches: &ArgMatches) -> Result<(), GwsError> {
         .collect();
 
     let output = json!({
+        "id": event.get("id"),
+        "calendarId": calendar_id,
+        "attachments": event.get("attachments").cloned().unwrap_or(json!([])),
         "summary": event.get("summary").and_then(|v| v.as_str()).unwrap_or("(No title)"),
         "start": event.get("start").and_then(|s| s.get("dateTime").or(s.get("date"))).and_then(|v| v.as_str()).unwrap_or(""),
         "end": event.get("end").and_then(|s| s.get("dateTime").or(s.get("date"))).and_then(|v| v.as_str()).unwrap_or(""),
@@ -549,7 +495,7 @@ async fn handle_weekly_digest(matches: &ArgMatches) -> Result<(), GwsError> {
     let time_max = week_end.to_rfc3339();
 
     // Fetch this week's events
-    let events_json = get_json(
+    let events = list_all(
         &client,
         "https://www.googleapis.com/calendar/v3/calendars/primary/events",
         &token,
@@ -560,30 +506,11 @@ async fn handle_weekly_digest(matches: &ArgMatches) -> Result<(), GwsError> {
             ("orderBy", "startTime"),
             ("maxResults", "50"),
         ],
+        "items",
     )
-    .await
-    .inspect_err(|e| {
-        eprintln!(
-            "Warning: Failed to fetch calendar events: {}",
-            sanitize_for_terminal(&e.to_string())
-        );
-    })
-    .unwrap_or(json!({}));
-    let events = events_json
-        .get("items")
-        .and_then(|i| i.as_array())
-        .cloned()
-        .unwrap_or_default();
+    .await?;
 
-    let meetings: Vec<Value> = events
-        .iter()
-        .map(|e| {
-            json!({
-                "summary": e.get("summary").and_then(|v| v.as_str()).unwrap_or("(No title)"),
-                "start": e.get("start").and_then(|s| s.get("dateTime").or(s.get("date"))).and_then(|v| v.as_str()).unwrap_or(""),
-            })
-        })
-        .collect();
+    let meetings: Vec<Value> = events.iter().map(|e| event_summary(e, "primary")).collect();
 
     // Fetch unread email count
     let gmail_json = get_json(
@@ -592,14 +519,7 @@ async fn handle_weekly_digest(matches: &ArgMatches) -> Result<(), GwsError> {
         &token,
         &[("q", "is:unread"), ("maxResults", "1")],
     )
-    .await
-    .inspect_err(|e| {
-        eprintln!(
-            "Warning: Failed to fetch unread email count: {}",
-            sanitize_for_terminal(&e.to_string())
-        );
-    })
-    .unwrap_or(json!({}));
+    .await?;
     let unread_estimate = gmail_json
         .get("resultSizeEstimate")
         .and_then(|v| v.as_u64())
@@ -607,8 +527,11 @@ async fn handle_weekly_digest(matches: &ArgMatches) -> Result<(), GwsError> {
 
     let output = json!({
         "meetings": meetings,
+        "complete": true,
+        "calendarId": "primary",
         "meetingCount": meetings.len(),
         "unreadEmails": unread_estimate,
+        "unreadEmailsIsEstimate": true,
         "periodStart": time_min,
         "periodEnd": time_max,
     });

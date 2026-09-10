@@ -20,7 +20,7 @@ Download email attachments by name or download all attachments
 ## Usage
 
 ```bash
-gws gmail +attachment --message-id <MSG_ID>
+gws gmail +attachment [OPTIONS] --message-id <MSG_ID>
 ```
 
 ## Flags
@@ -32,6 +32,7 @@ gws gmail +attachment --message-id <MSG_ID>
 | `--all` | — | — | Download all attachments |
 | `--output` | — | — | Output file path (only valid with --name) |
 | `--output-dir` | — | — | Output directory for downloaded files |
+| `--format` | — | json | Output format; JSON reports saved file paths and metadata |
 | `--dry-run` | — | — | Show the operations that would be executed without running them |
 
 ## Examples
@@ -40,6 +41,12 @@ gws gmail +attachment --message-id <MSG_ID>
 gws gmail +attachment --message-id MSG_ID --name invoice.pdf --output ./invoice.pdf
 gws gmail +attachment --message-id MSG_ID --all --output-dir ./downloads/
 ```
+
+## Tips
+
+- JSON output contains files with saved paths, sizes, and MIME types. Use --format text for human output.
+- Output paths must stay under the current directory. Existing files are preserved with numbered filenames.
+- Supports embedded and separately stored attachments, including inline images. Total download limit: 25 MB.
 
 ## See Also
 

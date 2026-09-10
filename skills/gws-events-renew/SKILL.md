@@ -20,7 +20,7 @@ Renew/reactivate Workspace Events subscriptions
 ## Usage
 
 ```bash
-gws events +renew
+gws events +renew [OPTIONS]
 ```
 
 ## Flags

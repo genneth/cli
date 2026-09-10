@@ -20,7 +20,7 @@ Today's meetings + open tasks as a standup summary
 ## Usage
 
 ```bash
-gws workflow +standup-report
+gws workflow +standup-report [OPTIONS]
 ```
 
 ## Flags
@@ -39,7 +39,8 @@ gws workflow +standup-report --format table
 ## Tips
 
 - Read-only — never modifies data.
-- Combines calendar agenda (today) with tasks list.
+- Combines today's primary calendar with the default task list; follows all pages up to 100 per list.
+- JSON preserves event/task IDs and source IDs. A failed source fails the command, never reports an empty list.
 
 ## See Also
 

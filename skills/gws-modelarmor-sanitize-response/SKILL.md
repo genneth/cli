@@ -20,7 +20,7 @@ Sanitize a model response through a Model Armor template
 ## Usage
 
 ```bash
-gws modelarmor +sanitize-response --template <NAME>
+gws modelarmor +sanitize-response [OPTIONS] --template <NAME>
 ```
 
 ## Flags

@@ -20,7 +20,7 @@ Reply to a message (handles threading automatically)
 ## Usage
 
 ```bash
-gws gmail +reply --message-id <ID> --body <TEXT>
+gws gmail +reply [OPTIONS] --message-id <ID> --body <TEXT>
 ```
 
 ## Flags

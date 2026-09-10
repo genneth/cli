@@ -20,7 +20,7 @@ Show upcoming events across all calendars
 ## Usage
 
 ```bash
-gws calendar +agenda
+gws calendar +agenda [OPTIONS]
 ```
 
 ## Flags
@@ -48,6 +48,8 @@ gws calendar +agenda --today --timezone America/New_York
 
 - Read-only — never modifies events.
 - Queries all calendars by default; use --calendar to filter.
+- Follows pagination for calendars and events; any failed fetch fails the command.
+- JSON includes event id, calendarId, and complete=true. Retrieval is bounded to 100 pages per list.
 - Uses your Google account timezone by default; override with --timezone.
 
 ## See Also

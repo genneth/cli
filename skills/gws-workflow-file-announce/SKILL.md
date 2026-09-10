@@ -20,7 +20,7 @@ Announce a Drive file in a Chat space
 ## Usage
 
 ```bash
-gws workflow +file-announce --file-id <ID> --space <SPACE>
+gws workflow +file-announce [OPTIONS] --file-id <ID> --space <SPACE>
 ```
 
 ## Flags

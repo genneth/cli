@@ -20,7 +20,7 @@ Prepare for your next meeting: agenda, attendees, and linked docs
 ## Usage
 
 ```bash
-gws workflow +meeting-prep
+gws workflow +meeting-prep [OPTIONS]
 ```
 
 ## Flags

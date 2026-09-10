@@ -20,7 +20,7 @@ Create a new Model Armor template
 ## Usage
 
 ```bash
-gws modelarmor +create-template --project <PROJECT> --location <LOCATION> --template-id <ID>
+gws modelarmor +create-template [OPTIONS] --project <PROJECT> --location <LOCATION> --template-id <ID>
 ```
 
 ## Flags

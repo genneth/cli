@@ -132,7 +132,7 @@ gws classroom <resource> <method> [flags]
     - Required path params: courseId, id
     - Request body type: `ModifyCourseWorkAssigneesRequest`
     - Response type: `CourseWork`
-  - `patch` — Updates one or more fields of a course work. See google.classroom.v1.CourseWork for details of which fields may be updated and who may change them. This request must be made by the Developer Console project of the [OAuth client ID](https://support.google.com/cloud/answer/6158849) used to create the corresponding course work item.
+  - `patch` — Updates one or more fields of a course work. See google.classroom.v1.CourseWork for details of which fields may be updated and who may change them. This request must be made by the Developer Console project of the [OAuth client ID](https://support.google.com/cloud/answer/6158849) used to create the corresponding course work item or an add-on attachment on the corresponding course work item.
     - Required path params: courseId, id
     - Request body type: `CourseWork`
     - Response type: `CourseWork`
@@ -199,11 +199,11 @@ gws classroom <resource> <method> [flags]
   - `list` — Returns a list of student submissions that the requester is permitted to view, factoring in the OAuth scopes of the request. A hyphen (`-`) may be specified as the `course_work_id` to include student submissions for multiple course work items. Course students may only view their own work. Course teachers and domain administrators may view all student submissions.
     - Required path params: courseId, courseWorkId
     - Response type: `ListStudentSubmissionsResponse`
-  - `modifyAttachments` — Modifies attachments of student submission. Attachments may only be added to student submissions belonging to course work objects with a `workType` of `ASSIGNMENT`. This request must be made by the Developer Console project of the [OAuth client ID](https://support.google.com/cloud/answer/6158849) used to create the corresponding course work item.
+  - `modifyAttachments` — Modifies attachments of student submission. Attachments may only be added to student submissions belonging to course work objects with a `workType` of `ASSIGNMENT`. This request must be made by the Developer Console project of the [OAuth client ID](https://support.google.com/cloud/answer/6158849) used to create the corresponding course work item or an add-on attachment on the corresponding course work item.
     - Required path params: courseId, courseWorkId, id
     - Request body type: `ModifyAttachmentsRequest`
     - Response type: `StudentSubmission`
-  - `patch` — Updates one or more fields of a student submission. See google.classroom.v1.StudentSubmission for details of which fields may be updated and who may change them. This request must be made by the Developer Console project of the [OAuth client ID](https://support.google.com/cloud/answer/6158849) used to create the corresponding course work item.
+  - `patch` — Updates one or more fields of a student submission. See google.classroom.v1.StudentSubmission for details of which fields may be updated and who may change them. This request must be made by the Developer Console project of the [OAuth client ID](https://support.google.com/cloud/answer/6158849) used to create the corresponding course work item or an add-on attachment with Grade Sync enabled on the corresponding course work item.
     - Required path params: courseId, courseWorkId, id
     - Request body type: `StudentSubmission`
     - Response type: `StudentSubmission`
@@ -215,7 +215,7 @@ gws classroom <resource> <method> [flags]
     - Required path params: courseId, courseWorkId, id
     - Request body type: `ReturnStudentSubmissionRequest`
     - Response type: `Empty`
-  - `turnIn` — Turns in a student submission. Turning in a student submission transfers ownership of attached Drive files to the teacher and may also update the submission state. This may only be called by the student that owns the specified student submission. This request must be made by the Developer Console project of the [OAuth client ID](https://support.google.com/cloud/answer/6158849) used to create the corresponding course work item.
+  - `turnIn` — Turns in a student submission. Turning in a student submission transfers ownership of attached Drive files to the teacher and may also update the submission state. This may only be called by the student that owns the specified student submission. This request must be made by the Developer Console project of the [OAuth client ID](https://support.google.com/cloud/answer/6158849) used to create the corresponding course work item or an add-on attachment on the corresponding course work item.
     - Required path params: courseId, courseWorkId, id
     - Request body type: `TurnInStudentSubmissionRequest`
     - Response type: `Empty`

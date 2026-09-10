@@ -82,7 +82,7 @@ gws docs <resource> <method> [flags]
 | `suggestedDocumentStyleChanges` | object | Output only. The suggested changes to the style of the document, keyed by suggestion ID. |
 | `suggestedNamedStylesChanges` | object | Output only. The suggested changes to the named styles of the document, keyed by suggestion ID. |
 | `suggestionsViewMode` | string | Output only. The suggestions view mode applied to the document. Note: When editing a document, changes must be based on a document with SUGGESTIONS_INLINE. |
-| `tabs` | array of `Tab` | Tabs that are part of a document. Tabs can contain child tabs, a tab nested within another tab. Child tabs are represented by the Tab.childTabs field. |
+| `tabs` | array of `Tab` | Output only. Tabs that are part of a document. Tabs can contain child tabs, a tab nested within another tab. Child tabs are represented by the Tab.childTabs field. |
 | `title` | string | The title of the document. |
 
 ## Discovering Commands

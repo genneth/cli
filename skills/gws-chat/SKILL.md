@@ -76,7 +76,7 @@ gws chat <resource> <method> [flags]
     - Required path params: name
     - Request body type: `Space`
     - Response type: `Space`
-  - `search` — Returns a list of spaces in a Google Workspace organization. For an example, see [Search for and manage spaces](https://developers.google.com/workspace/chat/search-manage-admin). When `use_admin_access` is set to `false`, the results are limited to spaces where the calling user is a joined member. To search with administrator privileges, set `use_admin_access` to `true`. Setting `use_admin_access` to `false` is available under Developer Preview.
+  - `search` — Returns a list of spaces in a Google Workspace organization. For an example, see [Search for and manage spaces](https://developers.google.com/workspace/chat/search-manage-admin). When `use_admin_access` is set to `false`, the results are limited to spaces where the calling user is a joined member. To search with administrator privileges, set `use_admin_access` to `true`.
     - Response type: `SearchSpacesResponse`
   - `setup` — Creates a space and adds specified users to it. The calling user is automatically added to the space, and shouldn't be specified as a membership in the request. For an example, see [Set up a space with initial members](https://developers.google.com/workspace/chat/set-up-spaces). To specify the human members to add, add memberships with the appropriate `membership.member.name`. To add a human user, use `users/{user}`, where `{user}` can be the email address for the user.
     - Request body type: `SetUpSpaceRequest`
@@ -102,6 +102,19 @@ gws chat <resource> <method> [flags]
     - Request body type: `Membership`
     - Response type: `Membership`
 
+### spaces.messagePins
+
+  - `create` — Creates a message pin. Requires [user authentication](https://developers.google.com/workspace/chat/authenticate-authorize-chat-user) with one of the following [authorization scopes](https://developers.google.com/workspace/chat/authenticate-authorize#chat-api-scopes): - `https://www.googleapis.com/auth/chat.spaces.pins` - `https://www.googleapis.com/auth/chat.spaces`
+    - Required path params: parent
+    - Request body type: `MessagePin`
+    - Response type: `MessagePin`
+  - `delete` — Deletes a message pin. Requires [user authentication](https://developers.google.com/workspace/chat/authenticate-authorize-chat-user) with one of the following [authorization scopes](https://developers.google.com/workspace/chat/authenticate-authorize#chat-api-scopes): - `https://www.googleapis.com/auth/chat.spaces.pins` - `https://www.googleapis.com/auth/chat.spaces`
+    - Required path params: name
+    - Response type: `Empty`
+  - `list` — Lists message pins in a space. Users can pin important messages in spaces for easy access. For more information, see [Pin or unpin a conversation in Google Chat](https://support.google.com/chat/answer/15622437).
+    - Required path params: parent
+    - Response type: `ListMessagePinsResponse`
+
 ### spaces.messages
 
   - `create` — Creates a message in a Google Chat space. For an example, see [Send a message](https://developers.google.com/workspace/chat/create-messages).
@@ -121,6 +134,10 @@ gws chat <resource> <method> [flags]
     - Required path params: name
     - Request body type: `Message`
     - Response type: `Message`
+  - `search` — Searches for messages in Google Chat that the calling user has access to. Returns a list of messages matching the search criteria. To search across all spaces the user has access to, set `parent` to `spaces/-`. Using any other value for `parent` results in an `INVALID_ARGUMENT` error. The returned messages have their `name` field populated with the full resource name, which includes the specific `space` in which the message resides. This API doesn't return all message types.
+    - Required path params: parent
+    - Request body type: `SearchMessagesRequest`
+    - Response type: `SearchMessagesResponse`
   - `update` — Updates a message. There's a difference between the `patch` and `update` methods. The `patch` method uses a `patch` request while the `update` method uses a `put` request. We recommend using the `patch` method. For an example, see [Update a message](https://developers.google.com/workspace/chat/update-messages).
     - Required path params: name
     - Request body type: `Message`
@@ -331,6 +348,15 @@ gws chat <resource> <method> [flags]
 | `memberships` | array of `Membership` | Unordered list. List of memberships in the requested (or first) page. |
 | `nextPageToken` | string | A token that you can send as `pageToken` to retrieve the next page of results. If empty, there are no subsequent pages. |
 
+### ListMessagePinsResponse
+
+*Description: Response message for listing message pins.*
+
+| Field | Type | Description |
+|---|---|---|
+| `messagePins` | array of `MessagePin` | The pinned messages from the specified space. |
+| `nextPageToken` | string | You can send a token as `pageToken` to retrieve the next page of results. If empty, there are no subsequent pages. |
+
 ### ListMessagesResponse
 
 *Description: Response message for listing messages.*
@@ -454,6 +480,7 @@ gws chat <resource> <method> [flags]
 | `fallbackText` | string | Optional. A plain-text description of the message's cards, used when the actual cards can't be displayed—for example, mobile notifications. |
 | `formattedText` | string | Output only. Contains the message `text` with markups added to communicate formatting. |
 | `lastUpdateTime` | string (format: google-datetime) | Output only. The time at which the message was last edited by a user. If the message has never been edited, this field is empty. |
+| `markupSyntax` | string | Optional. Specifies how the server interprets the message `text` field content. |
 | `matchedUrl` | `MatchedUrl` | Output only. A URL in the Chat message `text` field that matches a link preview pattern. For more information, see [Preview links](https://developers.google.com/workspace/chat/preview-links). |
 | `name` | string | Identifier. Resource name of the message. |
 | `privateMessageViewer` | `User` | Optional. Immutable. Input for creating a message, otherwise output only. The user that can view the message. When set, the message is private and only visible to the specified user and the Chat app. |
@@ -465,6 +492,15 @@ gws chat <resource> <method> [flags]
 | `text` | string | Optional. Plain-text body of the message. The first link to an image, video, or web page generates a [preview chip](https://developers.google.com/workspace/chat/preview-links). |
 | `thread` | `Thread` | The thread the message belongs to. For example usage, see [Start or reply to a message thread](https://developers.google.com/workspace/chat/create-messages#create-message-thread). |
 | `threadReply` | boolean | Output only. When `true`, the message is a response in a reply thread. |
+
+### MessagePin
+
+*Description: A pin on a Chat message. For more information see [Pin a message](https://support.google.com/chat?p=chat-board-hc).*
+
+| Field | Type | Description |
+|---|---|---|
+| `message` | string | Required. Immutable. The resource name of the message that is pinned. Format: `spaces/{space}/messages/{message}` |
+| `name` | string | Identifier. The resource name of the message pin. Format: `spaces/{space}/messagePins/{message_pin}` The resource ID component matches the resource ID component of the message. |
 
 ### MoveSectionItemRequest
 
@@ -509,15 +545,38 @@ gws chat <resource> <method> [flags]
 | `name` | string | Identifier. The resource name of the reaction. Format: `spaces/{space}/messages/{message}/reactions/{reaction}` |
 | `user` | `User` | Output only. The user who created the reaction. |
 
+### SearchMessagesRequest
+
+*Description: Request message for searching messages.*
+
+| Field | Type | Description |
+|---|---|---|
+| `filter` | string | Required. A search query. |
+| `markupSyntax` | string | Optional. Specifies the desired output syntax for the Chat message `formatted_text` field. |
+| `orderBy` | string | Optional. How the results list is ordered. Supported attributes to order by are: - `create_time`: Sorts the results by the time of the message creation. Default value. |
+| `pageSize` | integer (format: int32) | Optional. The maximum number of results to return. The service may return fewer than this value. If unspecified, at most 25 are returned. The maximum value is 100. |
+| `pageToken` | string | Optional. A token, received from the previous search messages call. Provide this parameter to retrieve the subsequent page. |
+| `view` | string | Optional. Specifies what kind of search results view to return. The default is `SEARCH_MESSAGES_VIEW_BASIC`. |
+
+### SearchMessagesResponse
+
+*Description: Response message for searching messages.*
+
+| Field | Type | Description |
+|---|---|---|
+| `nextPageToken` | string | A token that can be used to retrieve the next page. If this field is empty, there are no subsequent pages. |
+| `results` | array of `SearchMessageResult` | The list of search results that matched the query. |
+
 ### SearchSpacesResponse
 
 *Description: Response with a list of spaces corresponding to the search spaces request.*
 
 | Field | Type | Description |
 |---|---|---|
-| `nextPageToken` | string | A token that can be used to retrieve the next page. If this field is empty, there are no subsequent pages. |
+| `nextPageToken` | string | A token that can be used to retrieve the next page. If this field is empty, there are no subsequent pages. Only populated when `useAdminAccess` is set to `true`. |
+| `results` | array of `SearchSpaceResult` | Output only. The list of search results that matched the query. |
 | `spaces` | array of `Space` | Deprecated: Please use the new `results` field instead. A page of the requested spaces. |
-| `totalSize` | integer (format: int32) | The total number of spaces that match the query, across all pages. If the result is over 10,000 spaces, this value is an estimate. |
+| `totalSize` | integer (format: int32) | The total number of spaces that match the query, across all pages. If the result is over 10,000 spaces, this value is an estimate. Only populated when `useAdminAccess` is set to `true`. |
 
 ### SetUpSpaceRequest
 
@@ -526,7 +585,7 @@ gws chat <resource> <method> [flags]
 | Field | Type | Description |
 |---|---|---|
 | `memberships` | array of `Membership` | Optional. The Google Chat users or groups to invite to join the space. Omit the calling user, as they are added automatically. |
-| `requestId` | string | Optional. A unique identifier for this request. A random UUID is recommended. Specifying an existing request ID returns the space created with that ID instead of creating a new space. |
+| `requestId` | string | Optional. A unique ID for this request. A random UUID is recommended. |
 | `space` | `Space` | Required. The `Space.spaceType` field is required. To create a space, set `Space.spaceType` to `SPACE` and set `Space.displayName`. |
 
 ### Space
